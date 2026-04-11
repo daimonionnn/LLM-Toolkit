@@ -1,0 +1,23 @@
+# Build artifacts and external clones
+llama.cpp-*/
+
+# Model files (do not commit huge binaries)
+*.gguf
+*.bin
+
+# Log files
+*.log
+
+# Python cache / envs
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+env/
+.env
+
+# OS/Editor generated files
+.DS_Store
+.vscode/
+.idea/
+*.swp

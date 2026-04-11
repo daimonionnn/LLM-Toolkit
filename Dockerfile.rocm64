@@ -1,0 +1,16 @@
+FROM rocm/dev-ubuntu-24.04:6.4.4
+
+# Install ROCm math libraries needed by llama.cpp
+RUN apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends \
+      hipblas rocblas rocsolver curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Pre-built llama.cpp will be mounted at /app
+ENV LD_LIBRARY_PATH=/app/lib:/opt/rocm/lib:$LD_LIBRARY_PATH
+ENV HSA_ENABLE_SDMA=0
+ENV GGML_HIP_UMA=1
+ENV GPU_MAX_ALLOC_PERCENT=100
+
+
+EXPOSE 8082
