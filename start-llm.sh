@@ -9,7 +9,7 @@
 # Vulkan works perfectly via Mesa RADV / NVIDIA proprietary drivers.
 #
 # Usage:
-#   ./start-llm.sh                # Vulkan on RTX 5090 (~2117 t/s prompt, ~273 t/s gen)
+#   ./start-llm.sh                # Vulkan on iGPU
 #   ./start-llm.sh --vega         # Vulkan on Vega 8 iGPU (~49 t/s prompt, ~14 t/s gen)
 #   ./start-llm.sh --cpu          # CPU-only via ROCm build (~55 t/s prompt, ~12 t/s gen)
 #   ./start-llm.sh --rocm         # ROCm GPU offload (WARNING: crashes on kernel 6.17)
@@ -25,7 +25,8 @@ export HSA_ENABLE_SDMA=0
 export HCC_SERIALIZE_KERNEL=3
 export HCC_SERIALIZE_COPY=3
 
-MODEL="/home/matt/.lmstudio/models/lmstudio-community/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf"
+MODEL="/home/matt/.lmstudio/models/TheBloke/Llama-2-7B-Chat-GGUF/llama-2-7b-chat.Q4_K_S.gguf"
+#MODEL="/home/matt/.lmstudio/models/lmstudio-community/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf"
 PORT=8081
 
 # ─── Defaults: Vulkan0 ───

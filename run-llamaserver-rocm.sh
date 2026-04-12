@@ -56,8 +56,9 @@ export HSA_OVERRIDE_GFX_VERSION=9.0.0
 export HSA_ENABLE_SDMA=0
 export HCC_SERIALIZE_KERNEL=3
 export HCC_SERIALIZE_COPY=3
+# HSA_XNACK must be 0 on Vega8 iGPU otherwise it will freeze whole PC
 export HSA_XNACK=${HSA_XNACK:-0}   # 0=xnack-, 1=xnack+; must match build target
-export GGML_HIP_UMA=1
+export GGML_HIP_UMA=0
 export GPU_MAX_ALLOC_PERCENT=100
 export GPU_SINGLE_ALLOC_PERCENT=100
 export GPU_MAX_HEAP_SIZE=100
@@ -88,7 +89,7 @@ echo ""
 echo "  Model:  $MODEL"
 echo "  Args:   $*"
 echo "  GPU:    gfx90c → gfx900 (override)"
-echo "  UMA:    enabled (GGML_HIP_UMA=1)"
+echo "  UMA:    disabled (GGML_HIP_UMA=0)"
 echo "  CWSR:   $(cat /sys/module/amdgpu/parameters/cwsr_enable 2>/dev/null || echo '?') (need 0)"
 echo "  IOMMU:  $(grep -q 'amd_iommu=on' /proc/cmdline 2>/dev/null && echo 'off' || echo 'on (may crash)')"
 echo ""
