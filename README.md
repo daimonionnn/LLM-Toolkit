@@ -1,7 +1,6 @@
-# LLM Inference Toolkit for Linux — Vulkan/RocM/CUDA management for AMD APU machine with dedicated GPU
+# LLM Inference Toolkit for Linux — Vulkan/ROCm/CUDA management for AMD APU + dGPU
 
-Beta version - created for personal use and as playground
-Running local LLMs on a dual-GPU system using Llama Server and LM Studio (llama.cpp)
+Personal toolkit for running local LLMs on a dual-GPU system using llama.cpp (Llama Server) and LM Studio.
 
 ## Hardware
 
@@ -10,36 +9,44 @@ Running local LLMs on a dual-GPU system using Llama Server and LM Studio (llama.
 | CPU/APU | AMD Ryzen 7 5700G (8C/16T, Zen 3) |
 | iGPU | Radeon Vega 8 — gfx90c (GCN 5, 8 CUs, UMA) |
 | **dGPU** | **NVIDIA GeForce RTX 5090 (32 GB VRAM)** |
-| RAM | 48 GB DDR4 (shared with Vega 8 iGPU) |
+| RAM | 64 GB DDR4 (shared with Vega 8 iGPU via UMA) |
 | OS | Ubuntu 25.10 "Questing", kernel 6.17 |
 
-## Performance example
+## Performance
 
-Llama 2 7B Chat Q4_K_S (3.59 GiB), `-ngl 99 -c 512`:
+### RTX 5090 — Llama 2 7B Chat Q4_K_S (`-ngl 99 -c 512`)
 
 | Backend | Device | Prompt (t/s) | Generation (t/s) |
 |---------|--------|-------------|-------------------|
 | **Vulkan** | **RTX 5090** | **2,117** | **273** |
-| Vulkan | Vega 8 iGPU | 49 | 14 |
-| CPU-only | Ryzen 5700G | 55 | 12 |
+
+### Vega 8 iGPU — Qwen3.5-35B-A3B Q4_K_M (`-ngl 99 -c 2048`)
+
+| Backend | Prefill (t/s) | Generation (t/s) | Notes |
+|---------|--------------|------------------|-------|
+| CPU only (AVX2) | 82–88 | 17–18 | Fastest prefill — SIMD beats GPU dispatch overhead on UMA |
+| Vulkan native | 45–50 | 19–20 | Best generation throughput, stable across all context sizes |
+| ROCm 6.2.4 (Docker) | 37–51 | 11–14 | Working — requires Docker workaround (host HIP 5.7.1 incompatible) |
+| LM Studio (Vulkan) | 49–158* | 18–19 | *Prefill inflated by LM Studio batching — not directly comparable |
+
+> Full benchmark data in [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Quick Start
 
 ```bash
-# Default: Vulkan on RTX 5090 
+# Vulkan on RTX 5090 (default, fastest)
 ./start-llm.sh
 
-# API endpoint: http://127.0.0.1:8081/v1
-# Works with any OpenAI-compatible client
-```
+# Vega 8 iGPU via Vulkan
+./start-llm.sh --vega
 
-### Other modes
+# ROCm GPU via Docker (Vega 8, full GPU offload)
+./run-docker-rocm.sh /path/to/model.gguf -ngl 99 -c 2048 --no-warmup
 
-```bash
-./start-llm.sh              # RTX 5090 (default, fastest)
-./start-llm.sh --vega       # Vega 8 iGPU via Vulkan
-./start-llm.sh --cpu        # CPU-only (ROCm build, no GPU)
-./start-llm.sh --help       # Show all options
+# API endpoint: http://127.0.0.1:8080/v1
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"test","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
 ## Scripts
@@ -48,139 +55,122 @@ Llama 2 7B Chat Q4_K_S (3.59 GiB), `-ngl 99 -c 512`:
 |--------|---------|
 | [`start-llm.sh`](start-llm.sh) | **Main launcher.** Vulkan on RTX 5090 by default. Memory safeguards, `--vega`/`--cpu`/`--rocm` modes. |
 | [`run-llamaserver-vulkan.sh`](run-llamaserver-vulkan.sh) | Direct Vulkan llama-server wrapper with full device selection (`-dev Vulkan0`/`Vulkan1`). |
-| [`run-llamaserver-rocm.sh`](run-llamaserver-rocm.sh) | Legacy ROCm/HIP wrapper with Vega 8 env vars. Only useful for CPU-only mode. |
-| [`build-llamacpp-rocm-vega.sh`](build-llamacpp-rocm-vega.sh) | Build llama.cpp with ROCm/HIP targeting gfx900. Applies HIP 5.7 compatibility patches. |
-| [`launch-lmstudio-vulkan.sh`](launch-lmstudio-vulkan.sh) | Launch LM Studio with Vulkan backend. Has `--diagnose` mode. |
+| [`run-docker-rocm.sh`](run-docker-rocm.sh) | **Docker ROCm launcher.** Auto-builds `Dockerfile.rocm64` image on first run, passes GPU devices into container. |
+| [`run-llamaserver-rocm.sh`](run-llamaserver-rocm.sh) | Native ROCm wrapper — broken on host (HIP 5.7.1/Clang-21 mismatch); use `run-docker-rocm.sh` instead. |
+| [`build-llamacpp-rocm-vega.sh`](build-llamacpp-rocm-vega.sh) | Build llama.cpp with ROCm/HIP targeting gfx900 (used inside Docker, or for host experiments). |
+| [`launch-lmstudio-vulkan.sh`](launch-lmstudio-vulkan.sh) | Launch LM Studio with Vulkan env for Vega 8. Has `--diagnose` mode. |
+| [`test-server-perf.py`](test-server-perf.py) | Benchmark llama-server (port 8080) — prefill and decode t/s across 3 context sizes. |
+| [`test-lmstudio-perf.py`](test-lmstudio-perf.py) | Benchmark LM Studio (port 1234) — streaming time-to-first-token and decode t/s. |
 
-## Quick Start
+## ROCm on Vega 8
+
+**Host ROCm (HIP 5.7.1) is broken** — Ubuntu 25.10 ships HIP 5.7.1 paired with Clang-21, a ~2 major version mismatch. Individual GPU kernel tests pass, but inference segfaults at slot initialization regardless of model, flags, or layer count.
+
+**Docker ROCm 6.2.4 works.** Running llama.cpp in a `rocm/dev-ubuntu-24.04:6.2.4` container provides a coherent stack. Full 41/41 layer GPU offload confirmed on Qwen3.5-35B-A3B-Q4_K_M (20 GB model into 64 GB GTT).
 
 ```bash
-# Vulkan on RTX 5090 (default, fastest)
-./start-llm.sh
+# Start (auto-builds image on first run, ~10 min)
+./run-docker-rocm.sh /path/to/model.gguf -ngl 99 -c 2048 --no-warmup
+# Server: http://127.0.0.1:8080
 
-# Direct Vulkan launcher with more control
-./run-llamaserver-vulkan.sh ~/models/your-model.gguf -ngl 99 -dev Vulkan1 -c 4096
-
-# API endpoint
-curl http://127.0.0.1:8081/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"test","messages":[{"role":"user","content":"Hello!"}]}'
+# Stop
+docker stop $(docker ps -q --filter ancestor=llama-server-rocm-vega)
 ```
 
-> ⚠️ If your desktop freezes during launch, avoid full offload (`-ngl 99`) on Vega 8.
-> See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for recovery/tuning guidance.
+Key env vars baked into `Dockerfile.rocm64`:
+
+| Variable | Value | Reason |
+|----------|-------|--------|
+| `HSA_XNACK` | `0` | `1` hard-freezes the entire PC on Vega 8 |
+| `GGML_HIP_UMA` | `0` | UMA mode requires XNACK page-fault handling (disabled above) |
+| `HSA_OVERRIDE_GFX_VERSION` | `9.0.0` | Treat gfx90c as gfx900 |
+| `GPU_MAX_ALLOC_PERCENT` | `100` | Allow full GTT allocation |
+
+See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#docker-rocm-workaround-working-solution) for full details and the FP8 stub patch needed for gfx900.
 
 ## LM Studio (Vulkan)
 
-[`launch-lmstudio-vulkan.sh`](launch-lmstudio-vulkan.sh) launches LM Studio with the correct Vulkan environment for AMD Vega 8 (gfx90c). It sets up GPU device selection, Vulkan ICD, memory tuning, and guards against known pitfalls before launching.
-
-### Usage
+[`launch-lmstudio-vulkan.sh`](launch-lmstudio-vulkan.sh) launches LM Studio with the correct Vulkan environment for Vega 8.
 
 ```bash
-./launch-lmstudio-vulkan.sh              # Launch with Vulkan backend (default)
-./launch-lmstudio-vulkan.sh --diagnose   # Show GPU/memory info and check backends without launching
-./launch-lmstudio-vulkan.sh --dry-run    # Print configuration without launching
-./launch-lmstudio-vulkan.sh --help       # Show all options
+./launch-lmstudio-vulkan.sh              # Launch with Vulkan backend
+./launch-lmstudio-vulkan.sh --diagnose   # Check GPU/memory, show backend targets
+./launch-lmstudio-vulkan.sh --dry-run    # Print config without launching
 ```
 
-### What `--diagnose` checks
+> LM Studio's bundled ROCm backend only targets RDNA2+ (gfx1030+). Always select **Vulkan** in *Settings → My GPUs*.
 
-- Which GPU architectures LM Studio's ROCm backends were compiled for (and why gfx90c isn't in them)
-- Recent ROCm errors from LM Studio logs
-- VRAM and GTT memory availability
-- Render group membership and `/dev/kfd` access
-- Vulkan ICD presence (`radeon_icd.json`)
+## Model Capacity
 
-### Environment it sets
+### Vega 8 — 64 GB UMA (GTT)
 
-| Variable | Value | Purpose |
-|----------|-------|---------|
-| `GGML_VK_DEVICE` | `0` | Select AMD Radeon Graphics (RADV RENOIR) for Vulkan |
-| `VK_ICD_FILENAMES` | `radeon_icd.json` | Restrict to AMD Vulkan driver only (hides NVIDIA/llvmpipe so Vega 8 appears in LM Studio UI) |
-| `GPU_MAX_ALLOC_PERCENT` | `100` | Allow full UMA memory allocation |
-| `HSA_ENABLE_SDMA` | `0` | Disable SDMA (prevents crashes on APU iGPUs) |
-| `GGML_HIP_UMA` | `1` | Unified Memory Architecture mode |
-| `DRI_PRIME` | `pci-0000_0b_00.0` | Pin to AMD render node (`/dev/dri/renderD129`) |
+| Model Size | Quantization | VRAM Usage | Notes |
+|------------|-------------|------------|-------|
+| 3-4B | Q4_K_M | ~2-3 GB | Full offload |
+| 7-8B | Q4_K_M | ~4-5 GB | Full offload |
+| 13B | Q4_K_M | ~7-8 GB | Full offload |
+| 35B (MoE) | Q4_K_M | ~20 GB | Full offload — tested ✓ |
+| 70B | Q4_K_M | ~35-40 GB | Should fit in 64 GB GTT — untested |
 
-> **Note:** The ROCm backend in LM Studio only targets RDNA2+ (gfx1030+) and will crash on Vega 8.
-> Always select **Vulkan** in *Settings → My GPUs* after launch.
+> 64 GB GTT requires GRUB params: `amdgpu.gttsize=65536 ttm.pages_limit=16777216` — see [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
-### First-time in-app setup
+### RTX 5090 — 32 GB VRAM
 
-1. Open **Settings → My GPUs**
-2. Select **Vulkan** as the GPU backend (not ROCm)
-3. Ensure **AMD Radeon Graphics** is selected
-4. Load a GGUF model and set GPU offload layers
-
-### Model capacity (Vega 8, 16 GB UMA)
-
-| Model Size | Quantization | VRAM Usage | GPU Offload |
-|------------|-------------|------------|-------------|
-| 3-4B | Q4_K_M | ~2-3 GB | Full (`-ngl 99`) |
-| 7-8B | Q4_K_M | ~4-5 GB | Full (`-ngl 99`) |
-| 13B | Q4_K_M | ~7-8 GB | Partial |
-
-## Model Sizing Guide (RTX 5090 — 32 GB VRAM)
-
-| Model Size | Quantization | VRAM Usage | GPU Offload |
-|------------|-------------|------------|-------------|
-| 1-3B | Q4_K_M | ~1-2 GB | Full (`-ngl 99`) |
-| 7-8B | Q4_K_M | ~4-5 GB | Full (`-ngl 99`) |
-| 13B | Q4_K_M | ~7-8 GB | Full (`-ngl 99`) |
-| 34B | Q4_K_M | ~18-20 GB | Full (`-ngl 99`) |
-| 70B | Q4_K_M | ~35 GB | Mostly (may need -ngl ~60) |
+| Model Size | Quantization | VRAM Usage | Notes |
+|------------|-------------|------------|-------|
+| 7-8B | Q4_K_M | ~4-5 GB | Full offload |
+| 13B | Q4_K_M | ~7-8 GB | Full offload |
+| 34B | Q4_K_M | ~18-20 GB | Full offload |
+| 70B | Q4_K_M | ~35 GB | Mostly (may need `-ngl ~60`) |
 
 ## Documentation
 
-Detailed docs are in the [`docs/`](docs/) folder:
-
-- [**Build Guide**](docs/BUILD.md) — Prerequisites, building from source, what the build does
-- [**HIP 5.7 Patches**](docs/HIP57-PATCHES.md) — Technical details of patches needed for Ubuntu's HIP 5.7
-- [**Troubleshooting**](docs/TROUBLESHOOTING.md) — Common errors, diagnostics, debug tips
-- [**Architecture Notes**](docs/ARCHITECTURE.md) — Why gfx90c needs gfx900, GCN vs RDNA, memory model
+| Doc | Contents |
+|-----|---------|
+| [docs/benchmarks.md](docs/benchmarks.md) | Full benchmark results — ROCm Docker, Vulkan native, LM Studio, CPU |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common errors, Docker ROCm workaround, diagnostic commands |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | GPU architecture, Vulkan vs ROCm analysis, UMA memory model |
+| [docs/BUILD.md](docs/BUILD.md) | Build prerequisites, ROCm build from source, HIP patches |
+| [docs/HIP57-PATCHES.md](docs/HIP57-PATCHES.md) | Technical details of HIP 5.7 compatibility patches |
 
 ## Project Structure
 
 ```
-LLMToolkit/
-├── README.md                      ← You are here
+LLM-Toolkit/
+├── README.md
 ├── start-llm.sh                   ← Main launcher (Vulkan/RTX 5090 default)
 ├── run-llamaserver-vulkan.sh      ← Vulkan llama-server wrapper
-├── run-llamaserver-rocm.sh        ← Legacy ROCm wrapper (CPU-only fallback)
-├── build-llamacpp-rocm-vega.sh    ← Build llama.cpp with ROCm for gfx900
+├── run-docker-rocm.sh             ← Docker ROCm launcher (working solution for Vega 8)
+├── run-llamaserver-rocm.sh        ← Native ROCm wrapper (broken on host, kept for reference)
+├── Dockerfile.rocm64              ← Builds llama.cpp with ROCm 6.2.4 for gfx900
+├── build-llamacpp-rocm-vega.sh    ← ROCm build script (used inside Docker)
 ├── launch-lmstudio-vulkan.sh      ← LM Studio launcher (Vulkan)
-├── Dockerfile.rocm64              ← Docker image for ROCm 6.4.4 testing
-├── docs/                          ← Detailed documentation
+├── test-server-perf.py            ← llama-server benchmark (port 8080)
+├── test-lmstudio-perf.py          ← LM Studio benchmark (port 1234, streaming)
+├── docs/
+│   ├── benchmarks.md              ← Benchmark results (all backends)
 │   ├── BUILD.md                   ← Build prerequisites and instructions
-│   ├── HIP57-PATCHES.md          ← HIP 5.7 compatibility patches
-│   ├── TROUBLESHOOTING.md        ← Common errors and debug tips
-│   └── ARCHITECTURE.md           ← GPU architecture, Vulkan vs ROCm analysis
+│   ├── HIP57-PATCHES.md           ← HIP 5.7 compatibility patches
+│   ├── TROUBLESHOOTING.md         ← Common errors and debug tips
+│   └── ARCHITECTURE.md            ← GPU architecture, Vulkan vs ROCm analysis
 ├── llama.cpp-vulkan/              ← Vulkan build (production)
-│   ├── bin/llama-server
-│   └── lib/
-├── llama.cpp-rocm-vega/           ← ROCm build (legacy, CPU-only)
-│   ├── bin/llama-server
-│   └── lib/
-├── llama.cpp-rocm64/              ← Docker ROCm 6.4.4 build (crashes)
-└── llama.cpp-build/               ← Build workspace (source)
-    └── llama.cpp/
+├── llama.cpp-rocm-vega/           ← ROCm build (gfx900; CPU-only usable on host)
+└── llama.cpp-build/               ← Build workspace (llama.cpp source)
 ```
-
-## ROCm Status (Legacy)
-
-> **ROCm/HIP compute on Vega 8 is broken with kernel 6.17.** Both Ubuntu's ROCm 5.7 packages and Docker ROCm 6.4.4 crash at the kernel driver level (`no-retry page fault` → MODE2 GPU reset). This is an amdgpu driver bug, not fixable from userspace. The ROCm build is preserved for CPU-only fallback. See [Architecture Notes](docs/ARCHITECTURE.md) for the full analysis.
 
 ## TODO
 
 - [x] Build llama.cpp with ROCm/HIP for gfx900
 - [x] Fix xnack (plain gfx900 = xnack-agnostic)
-- [x] Fix COv6 incompatibility (force -mcode-object-version=5)
-- [x] Isolate crash to HIP 5.7 runtime + kernel 6.17 driver bug
-- [x] Test ROCm 6.4.4 via Docker (also crashes — kernel-level)
+- [x] Fix COv6 incompatibility (force `-mcode-object-version=5`)
+- [x] Isolate host crash to HIP 5.7.1 / Clang-21 version mismatch
+- [x] Fix GRUB params for 64 GB GTT (`amdgpu.gttsize=65536 ttm.pages_limit=16777216`)
+- [x] **Docker ROCm 6.2.4 — working, full GPU offload confirmed**
 - [x] **Build llama.cpp with Vulkan backend**
-- [x] **Discover RTX 5090**
 - [x] **Test Vulkan on Vega 8 (stable)**
 - [x] **Create Vulkan launcher scripts**
-- [x] Update documentation with full performance comparison
-- [ ] Test larger models
+- [x] Benchmark all backends (ROCm Docker, Vulkan native, CPU, LM Studio)
+- [x] Document all findings
+- [ ] Test 70B models on Vega 8 (should fit in 64 GB GTT)
 - [ ] Benchmark with flash attention enabled
+- [ ] Install official AMD ROCm on host to eliminate Docker dependency

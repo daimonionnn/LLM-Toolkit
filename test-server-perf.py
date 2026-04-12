@@ -3,10 +3,10 @@ import urllib.request
 import json
 import time
 
-URL = "http://127.0.0.1:8081/completion"
+URL = "http://127.0.0.1:8080/completion"
 BASE_WORDS = ["The", "quick", "brown", "fox", "jumped", "over", "the", "lazy", "dog.", "Here", "is", "some", "more", "text", "to", "fill", "up", "the", "context", "window."]
 
-print("Testing llama-server performance on http://127.0.0.1:8081 ...\n")
+print("Testing llama-server performance on http://127.0.0.1:8080 ...\n")
 print(f"{'Context Size':<15} | {'Prefill (Prompt)':<20} | {'Generation (Decode)'}")
 print("-" * 65)
 
@@ -38,5 +38,5 @@ for target_words in [128, 1024, 4096]:
             else:
                 print(f"Error: No timings returned for {target_words} words.")
     except urllib.error.URLError as e:
-        print(f"Connection failed: {e}. Is the server running on port 8081?")
+        print(f"Connection failed: {e}. Is the server running on port 8080?")
         break

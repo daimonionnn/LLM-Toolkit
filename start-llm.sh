@@ -25,15 +25,15 @@ export HSA_ENABLE_SDMA=0
 export HCC_SERIALIZE_KERNEL=3
 export HCC_SERIALIZE_COPY=3
 
-MODEL="/home/matt/.lmstudio/models/TheBloke/Llama-2-7B-Chat-GGUF/llama-2-7b-chat.Q4_K_S.gguf"
-#MODEL="/home/matt/.lmstudio/models/lmstudio-community/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf"
-PORT=8081
+#MODEL="/home/matt/.lmstudio/models/TheBloke/Llama-2-7B-Chat-GGUF/llama-2-7b-chat.Q4_K_S.gguf"
+MODEL="/home/matt/.lmstudio/models/lmstudio-community/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf"
+PORT=8080
 
 # ─── Defaults: Vulkan0 ───
 BACKEND="vulkan"
 VULKAN_DEV="Vulkan0"     # Vega8
 NGL=99
-CTX=4096
+CTX=50000
 EXTRA_ARGS=()
 
 # ─── Minimum available RAM (MB) required to proceed ───
@@ -44,16 +44,16 @@ case "${1:-}" in
     --vega)
         VULKAN_DEV="Vulkan0"   # AMD Radeon Vega 8 (RADV RENOIR)
         NGL=99
-        CTX=512
-        echo "  Mode: Vulkan on Vega 8 iGPU (~49/14 t/s)"
+        CTX=50000
+        echo "  Mode: Vulkan on Vega 8 iGPU"
         shift
         ;;
     --cpu)
         BACKEND="rocm"
         NGL=0
-        CTX=512
+        CTX=50000
         export HIP_VISIBLE_DEVICES=-1   # hide GPU, pure CPU mode
-        echo "  Mode: CPU-only (~55/12 t/s)"
+        echo "  Mode: CPU-only"
         shift
         ;;
     --rocm)
@@ -68,9 +68,9 @@ case "${1:-}" in
     --help|-h)
         echo "Usage: $0 [--vega|--cpu|--rocm|--help]"
         echo ""
-        echo "  (default)   Vulkan on RTX 5090 — ~2117/273 t/s"
-        echo "  --vega      Vulkan on Vega 8 iGPU — ~49/14 t/s"
-        echo "  --cpu       CPU-only (ROCm build) — ~55/12 t/s"
+        echo "  (default)   Vulkan on RTX"
+        echo "  --vega      Vulkan on Vega 8 iGPU"
+        echo "  --cpu       CPU-only (ROCm build)"
         echo "  --rocm      ROCm GPU offload (CRASHES on kernel 6.17)"
         echo ""
         exit 0

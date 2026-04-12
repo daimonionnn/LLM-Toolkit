@@ -27,10 +27,21 @@ Llama 2 7B Chat Q4_K_S (3.59 GiB), `-ngl 99 -c 512`:
 | Backend | Device | Prompt (t/s) | Generation (t/s) | Status |
 |---------|--------|-------------|-------------------|--------|
 | **Vulkan** | **RTX 5090 (Vulkan1)** | **2,117** | **273** | **Production** |
-| Vulkan | Vega 8 (Vulkan0) | 49 | 14 | Works, slow (UMA) |
+| Vulkan | Vega 8 (Vulkan0) | 49 | 14 | Works |
 | ROCm (CPU-only) | Ryzen 5700G | 55 | 12 | Works (HIP_VISIBLE_DEVICES=-1) |
-| ROCm (GPU) | Vega 8 (HIP) | — | — | **CRASHES** (kernel 6.17 bug) |
-| ROCm 6.4.4 Docker | Vega 8 (gfx90c) | — | — | **CRASHES** (same kernel bug) |
+| ROCm (GPU, host) | Vega 8 (HIP 5.7.1) | — | — | **CRASHES** (HIP 5.7.1/Clang-21 mismatch) |
+| ROCm 6.4.4 (Docker) | Vega 8 (gfx90c) | — | — | **CRASHES** (kernel amdgpu bug) |
+| **ROCm 6.2.4 (Docker)** | **Vega 8 (gfx900)** | **37–51** | **11–14** | **✅ Working** |
+
+Qwen3.5-35B-A3B Q4_K_M (`-ngl 99 -c 2048`):
+
+| Backend | Prefill (t/s) | Generation (t/s) | Status |
+|---------|--------------|------------------|--------|
+| CPU only (AVX2) | 82–88 | 17–18 | ✅ Working |
+| Vulkan native | 45–50 | 19–20 | ✅ Working |
+| **ROCm 6.2.4 (Docker)** | **37–51** | **11–14** | **✅ Working** |
+
+> Full details in [benchmarks.md](benchmarks.md).
 
 ## GPU Architecture Generations
 
@@ -117,28 +128,37 @@ Vulkan bypasses the entire ROCm/HIP/HSA stack and uses:
 
 ### Backend comparison
 
-| Aspect | Vulkan (RADV/NVIDIA) | ROCm (HIP 5.7) | ROCm 6.4.4 (Docker) |
-|--------|---------------------|-----------------|----------------------|
-| Driver | Mesa RADV / NVIDIA proprietary | ROCm/HSA + HIP | ROCm 6.4.4 + HIP 6.4 |
-| gfx90c support | Native (RADV) | Via gfx900 override | Native (gfx90c detected) |
-| RTX 5090 support | **Yes** (Vulkan1) | No (AMD only) | No (AMD only) |
-| Setup complexity | Zero (works OOTB) | Build from source, patches needed | Docker image + bind mounts |
-| Stability | **Rock solid** | Segfaults in libamdhip64 | Kernel crashes (MODE2 GPU reset) |
-| RTX 5090 perf | **2,117 / 273 t/s** | N/A | N/A |
-| Vega 8 perf | 49 / 14 t/s | N/A (crashes) | N/A (crashes) |
-| Crash risk | None | Hard system locks | **Hard system locks** (PC reboots) |
+| Aspect | Vulkan (RADV/NVIDIA) | ROCm host (HIP 5.7.1) | ROCm 6.4.4 (Docker) | ROCm 6.2.4 (Docker) |
+|--------|---------------------|----------------------|----------------------|---------------------|
+| Driver | Mesa RADV / NVIDIA proprietary | ROCm/HSA + HIP | ROCm 6.4.4 + HIP | ROCm 6.2.4 + HIP |
+| gfx90c support | Native (RADV) | Via gfx900 override | Native | Via gfx900 override |
+| RTX 5090 support | **Yes** (Vulkan1) | No (AMD only) | No | No |
+| Setup complexity | Zero (works OOTB) | Build from source + patches | Docker (crashes) | `./run-docker-rocm.sh` |
+| Stability | **Rock solid** | Segfaults in libamdhip64 | Kernel crashes (MODE2 reset) | **✅ Stable** |
+| RTX 5090 perf | **2,117 / 273 t/s** | N/A | N/A | N/A |
+| Vega 8 perf (35B) | 45–50 / 19–20 t/s | N/A (crashes) | N/A (crashes) | **37–51 / 11–14 t/s** |
+| Crash risk | None | Hard system locks | Hard system locks | None |
 
-### Docker ROCm 6.4.4 test results
+### Docker ROCm test results
 
-Used `rocm/dev-ubuntu-24.04:6.4.4` Docker image:
-- `rocminfo` inside Docker detected **gfx90c natively** (no `HSA_OVERRIDE_GFX_VERSION` needed)
-- llama.cpp built successfully targeting native `gfx90c`
+**ROCm 6.4.4 (`rocm/dev-ubuntu-24.04:6.4.4`) — CRASHES:**
+- `rocminfo` inside Docker detected **gfx90c natively**
+- llama.cpp built targeting native `gfx90c`
 - GPU inference immediately triggered: `no-retry page fault` storm → `IB test failed on comp_1.1.0 (-110)` → MODE2 GPU reset → display wedged
-- **Two separate test runs both hard-crashed the PC**
+- Two separate test runs both hard-crashed the PC
+- This appeared to prove a kernel amdgpu driver bug
 
-This proves the issue is in the **kernel amdgpu driver** (6.17.0-20-generic), not the userspace ROCm version.
+**ROCm 6.2.4 (`rocm/dev-ubuntu-24.04:6.2.4`) — WORKS ✅:**
+- Targets `gfx900` with `HSA_OVERRIDE_GFX_VERSION=9.0.0` (not native gfx90c)
+- Required: `HSA_XNACK=0` (XNACK=1 hard-freezes the PC), `GGML_HIP_UMA=0` (UMA requires XNACK)
+- Required: FP8 stub patch in `vendors/hip.h` (gfx900 has no FP8 instructions)
+- Full 41/41 layer offload of Qwen3.5-35B-A3B-Q4_K_M (20 GB) into 64 GB GTT
+- Output: `ggml_cuda_init: found 1 ROCm devices (Total VRAM: 65536 MiB)`
+- Confirmed stable across multiple requests
 
-**Verdict: Use Vulkan on RTX 5090.** The RTX 5090 is ~20x faster than any other option on this system.
+**Why 6.2.4 works but 6.4.4 crashes:** The 6.4.4 image targeted gfx90c natively, triggering a kernel-level compute ring issue. The 6.2.4 image uses `HSA_OVERRIDE_GFX_VERSION=9.0.0` to present as gfx900 and avoids that code path. The FP8 patch resolves the remaining compile error for gfx900. See `Dockerfile.rocm64` for the full solution.
+
+**Primary recommendation: Vulkan on RTX 5090** for maximum throughput (RTX 5090 is ~20x faster). **Secondary: Docker ROCm 6.2.4** for ROCm-specific testing on Vega 8.
 
 ## SDMA and APU Quirks
 
@@ -247,24 +267,24 @@ Both models crash identically, confirming it's not model-specific:
 - **Gemma 4 E2B** (Q4_K_M, 3.18 GiB, 4.65B params) — hard crash at `-ngl 35`
 - **Llama 2 7B Chat** (Q4_K_S) — hard crash, then segfault at `-ngl 0`
 
-### Action plan — RESOLVED
+### Resolution
 
-The Vulkan path resolved all issues. The resolution path was:
-
-1. ~~**Increase `amdgpu.gttsize`**~~ — Done (8192 MB), didn't help. Crashes are in the compute ring, not memory allocations.
-2. ~~**Proper ROCm installation**~~ — Tested ROCm 6.4.4 via Docker. Same kernel-level crash. Not a userspace issue.
-3. **Vulkan (RADV/NVIDIA) — SUCCESS** — Vulkan uses Mesa RADV for AMD and NVIDIA proprietary driver. Both work perfectly. 
+1. ~~**Increase `amdgpu.gttsize`**~~ — Applied (`amdgpu.gttsize=65536 ttm.pages_limit=16777216`), unlocks 64 GB GTT but doesn't fix the HIP crash.
+2. ~~**ROCm 6.4.4 Docker**~~ — Crashed at kernel level (MODE2 GPU reset). Tests confirmed gfx90c native targeting triggers an amdgpu driver bug.
+3. **Vulkan (RADV/NVIDIA) — ✅ Production** — Zero setup, rock-solid stability, best throughput on RTX 5090.
+4. **ROCm 6.2.4 Docker — ✅ Working** — `run-docker-rocm.sh` / `Dockerfile.rocm64`. Coherent ROCm stack avoids the host HIP 5.7.1 mismatch. Uses gfx900 override + FP8 stub patch. Full GPU offload confirmed. 
 
 ### Launcher scripts
 
 | Script | Backend | Usage |
 |--------|---------|-------|
 | `start-llm.sh` | Vulkan (RTX 5090 default) | `./start-llm.sh` |
-| `start-llm.sh --vega` | Vulkan (Vega 8) | For testing on iGPU |
-| `start-llm.sh --cpu` | ROCm (CPU-only) | Fallback, ~12 t/s |
-| `start-llm.sh --rocm` | ROCm (GPU) | **WARNING: crashes** |
+| `start-llm.sh --vega` | Vulkan (Vega 8) | iGPU via RADV |
+| `start-llm.sh --cpu` | CPU-only | No GPU, ~18 t/s gen |
+| `start-llm.sh --rocm` | ROCm host (GPU) | **WARNING: crashes** |
 | `run-llamaserver-vulkan.sh` | Vulkan | Direct launcher with full options |
-| `run-llamaserver-rocm.sh` | ROCm | Legacy, for CPU-only use |
+| `run-docker-rocm.sh` | ROCm 6.2.4 (Docker) | **Working ROCm GPU offload** |
+| `run-llamaserver-rocm.sh` | ROCm host | Legacy, CPU-only usable |
 
 ## ROCm Software Stack on Ubuntu 25.10
 

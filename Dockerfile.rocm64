@@ -1,16 +1,40 @@
-FROM rocm/dev-ubuntu-24.04:6.4.4
+FROM rocm/dev-ubuntu-24.04:6.2.4
 
-# Install ROCm math libraries needed by llama.cpp
 RUN apt-get update -qq && \
     apt-get install -y -qq --no-install-recommends \
-      hipblas rocblas rocsolver curl && \
+      build-essential cmake git curl python3 libomp-dev \
+      hipblas-dev rocblas-dev rocsolver-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Pre-built llama.cpp will be mounted at /app
-ENV LD_LIBRARY_PATH=/app/lib:/opt/rocm/lib:$LD_LIBRARY_PATH
+WORKDIR /app
+RUN git clone https://github.com/ggml-org/llama.cpp.git .
+
+# Patch: gfx900 (Vega) does not support FP8. vendors/hip.h unconditionally
+# typedef-aliases CUDA FP8 types to HIP FP8 types, which don't exist on gfx900.
+# Replace each FP8 typedef with a plain stub struct so the code compiles on gfx900.
+RUN for HIP_FP8 in __hip_fp8_e4m3 __hip_fp8_e5m2 __hip_fp8_e4m3_fnuz __hip_fp8_e5m2_fnuz; do \
+      NV_FP8=$(echo "$HIP_FP8" | sed 's/__hip_/__nv_/'); \
+      sed -i "s|typedef ${HIP_FP8} ${NV_FP8};|struct ${NV_FP8} { unsigned char data; };|g" \
+        ggml/src/ggml-cuda/vendors/hip.h; \
+    done && echo 'FP8 typedef patch applied'
+
+RUN cmake -B build \
+      -DGGML_HIP=ON \
+      -DAMDGPU_TARGETS="gfx900" \
+      -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build build --config Release -j$(nproc)
+
+# ROCm environment for Vega 8 APU
+ENV HSA_OVERRIDE_GFX_VERSION=9.0.0
 ENV HSA_ENABLE_SDMA=0
-ENV GGML_HIP_UMA=1
+# HSA_XNACK=0: prevents PC hang on Vega 8 iGPU (XNACK=1 freezes whole system)
+ENV HSA_XNACK=0
+# GGML_HIP_UMA=0: with XNACK=0, UMA causes segfaults (page-fault handling disabled)
+ENV GGML_HIP_UMA=0
 ENV GPU_MAX_ALLOC_PERCENT=100
+ENV GPU_SINGLE_ALLOC_PERCENT=100
+ENV GPU_MAX_HEAP_SIZE=100
+ENV GPU_FORCE_64BIT_PTR=1
 
-
-EXPOSE 8082
+EXPOSE 8080
+ENTRYPOINT ["/app/build/bin/llama-server"]

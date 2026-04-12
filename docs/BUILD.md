@@ -6,7 +6,7 @@ Building llama.cpp from source with ROCm/HIP support for the AMD Vega 8 APU (gfx
 
 LM Studio's bundled ROCm backend only includes kernels for RDNA2+ GPUs (gfx1030 and newer). The Vega 8 iGPU uses the GCN 5 architecture (gfx90c), which isn't supported. Building llama.cpp ourselves lets us target `gfx900` — the closest official ROCm target to gfx90c.
 
-> **⚠️ Current Status (April 2026):** The custom ROCm build compiles successfully and individual GPU kernel tests pass (SCALE, MUL_MAT across all quantization types). However, **actual model inference crashes** due to a fundamental version mismatch in Ubuntu 25.10's ROCm packages (clang-21 + HIP 5.7.1). This affects all models and all GPU layer counts, including `-ngl 0`. **Use Vulkan instead** — see [ARCHITECTURE.md](ARCHITECTURE.md#rocm-runtime-crash-analysis) for the full analysis.
+> **Status (April 2026):** The custom ROCm build compiles successfully and individual GPU kernel tests pass (SCALE, MUL_MAT across all quantization types). However, **native host ROCm GPU inference crashes** due to a fundamental version mismatch in Ubuntu 25.10's ROCm packages (clang-21 + HIP 5.7.1). **Docker ROCm 6.2.4 resolves this** — `./run-docker-rocm.sh` builds and runs a coherent ROCm stack inside a container, with full GPU offload working. For native GPU inference without Docker, **use Vulkan** — see [ARCHITECTURE.md](ARCHITECTURE.md#rocm-runtime-crash-analysis).
 
 ## Prerequisites
 
@@ -114,7 +114,19 @@ Just re-run:
 
 ## Running
 
-### Standalone llama-server (Recommended)
+### Standalone llama-server via Docker (Recommended for ROCm GPU)
+
+The host ROCm stack (HIP 5.7.1) crashes on GPU inference. Use the Docker launcher instead:
+
+```bash
+./run-docker-rocm.sh ~/models/your-model.gguf -ngl 99 -c 2048 --no-warmup
+# Auto-builds the Docker image on first run (~10 min)
+# Server: http://127.0.0.1:8080/v1
+```
+
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md#docker-rocm-workaround-working-solution) for full details.
+
+### Standalone llama-server (Native, CPU-only)
 
 ```bash
 ./run-llamaserver-rocm.sh ~/models/your-model.gguf -ngl 99
@@ -122,30 +134,36 @@ Just re-run:
 
 This wrapper sets all the required environment variables and launches the server. The API is available at `http://127.0.0.1:8080/v1`.
 
+> **Note:** `-ngl 99` will crash on the host (HIP 5.7.1 bug). For CPU-only mode, use `-ngl 0` or set `HIP_VISIBLE_DEVICES=-1`.
+
 ### Manual Run
 
 ```bash
 export HSA_OVERRIDE_GFX_VERSION=9.0.0
 export HSA_ENABLE_SDMA=0
-export GGML_HIP_UMA=1
+export HSA_XNACK=0        # 1 hard-freezes Vega 8 PC
+export GGML_HIP_UMA=0     # UMA=1 segfaults when XNACK=0
 export GPU_MAX_ALLOC_PERCENT=100
 
 ./llama.cpp-rocm-vega/bin/llama-server \
     -m ~/models/your-model.gguf \
-    -ngl 99 \
+    -ngl 0 \
     --host 0.0.0.0 --port 8080
 ```
+
+> Use `-ngl 0` for CPU-only. Any GPU offload (`-ngl 1+`) will segfault on the host (HIP 5.7.1 mismatch). Use `./run-docker-rocm.sh` for GPU offload.
 
 ### Interactive CLI Chat
 
 ```bash
 export HSA_OVERRIDE_GFX_VERSION=9.0.0
 export HSA_ENABLE_SDMA=0
-export GGML_HIP_UMA=1
+export HSA_XNACK=0
+export GGML_HIP_UMA=0
 
 ./llama.cpp-rocm-vega/bin/llama-cli \
     -m ~/models/your-model.gguf \
-    -ngl 99 \
+    -ngl 0 \
     -c 4096 \
     --chat-template chatml
 ```

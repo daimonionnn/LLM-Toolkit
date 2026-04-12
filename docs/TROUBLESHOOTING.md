@@ -106,16 +106,16 @@ readelf -n libggml-hip.so | grep -o 'xnack[^ ]*'
 # Good: xnack=on
 ```
 
-**Fix:** Build with the xnack+ feature flag and set the runtime variable:
-```bash
-# In CMake / build script:
-AMDGPU_TARGETS="gfx900:xnack+"    # not just "gfx900"
+**Note:** This was an earlier approach that was superseded. The Docker ROCm 6.2.4 build uses plain `gfx900` (xnack-agnostic) with `HSA_XNACK=0`, which avoids this entirely. The `gfx900:xnack+` / `HSA_XNACK=1` combination hard-freezes the Vega 8 PC.
 
-# At runtime:
-export HSA_XNACK=1
+~~**Fix:** Build with the xnack+ feature flag and set the runtime variable:~~
+```bash
+# DO NOT USE — HSA_XNACK=1 hard-freezes Vega 8 PC
+# AMDGPU_TARGETS="gfx900:xnack+"
+# export HSA_XNACK=1
 ```
 
-The build script (`build-llamacpp-rocm-vega.sh`) applies this automatically.
+**Current approach (Docker ROCm 6.2.4):** Use plain `gfx900` (xnack-agnostic) with `HSA_XNACK=0`.
 
 ### "COMGR fails to parse code objects" / silent GPU failures (COv6 mismatch)
 
@@ -195,19 +195,65 @@ This was confirmed through systematic isolation testing:
 
 The HIP 5.7.1 runtime is ~2 major versions behind the compiler/device libs. This mismatch causes the scheduler to crash during sustained inference workloads.
 
-**Action Plan / Fixes:** The current plan to resolve this is:
+**Action Plan / Fixes:**
 1. ~~**Increase `amdgpu.gttsize` in GRUB:**~~ (Failed - still segfaults).
-2. **Kernel params from [AgentZ article](https://medium.com/@agentz/how-to-fix-rocm-pytorch-memory-faults-on-amd-gpus-segmentation-fault-page-not-present-544b9f62f627):** Three GRUB parameters that fix ROCm memory faults on AMD GPUs:
-   ```
-   amdgpu.cwsr_enable=1    # Disable compute wave save/restore (crash trigger on APUs)
-   amd_iommu=on           # Disable IOMMU ("page not present" faults)
-   ttm.pages_limit=12582912  # Raise TTM page limit (~48 GB vs default ~23 GB)
-   ```
-   Applied via: `GRUB_CMDLINE_LINUX_DEFAULT="quiet splash amdgpu.gttsize=8192 amdgpu.cwsr_enable=1 amd_iommu=on ttm.pages_limit=12582912"` — requires `sudo update-grub` and reboot.
-3. **Install Official AMD Drivers:** The Ubuntu 25.10 toolchain mismatch (Clang 21 + HIP 5.7.1) is to blame. Purge Ubuntu ROCm packages and install the official matched AMD ROCm stack.
-3. **Fallback to Vulkan:** If official ROCm is unstable or slow, use the Vulkan backend which has native support for gfx90c/Vega 8 via Mesa RADV.
+2. ~~**Kernel params (AgentZ article):**~~ Applied and verified — GRUB params fix memory faults but the HIP 5.7.1 / Clang-21 mismatch still causes slot-initialization segfaults on the host.
+3. ✅ **Docker with ROCm 6.2.4:** Fully working — see [Docker ROCm Workaround](#docker-rocm-workaround-working-solution) below.
+4. **Install Official AMD Drivers:** Alternative to Docker — purge Ubuntu ROCm packages and install the official matched AMD ROCm stack.
+5. **Fallback to Vulkan:** Use the Vulkan backend which has native support for gfx90c/Vega 8 via Mesa RADV (`./run-llamaserver-vulkan.sh`).
 
 See the [Architecture Notes](ARCHITECTURE.md#rocm-runtime-crash-analysis) for the full technical analysis.
+
+### Docker ROCm Workaround (Working Solution)
+
+The host Ubuntu ROCm stack (HIP 5.7.1 + Clang-21) has an unresolvable version mismatch that causes segfaults at slot initialization. Running llama.cpp in a Docker container with a coherent **ROCm 6.2.4** base image fixes this completely.
+
+**Quick start:**
+```bash
+./run-docker-rocm.sh /path/to/model.gguf -ngl 99 -c 2048 --no-warmup
+# Server available at http://127.0.0.1:8080
+```
+
+**How it works:** `run-docker-rocm.sh` auto-builds the image from `Dockerfile.rocm64` on first run, then starts the container with GPU device passthrough (`/dev/kfd`, `/dev/dri`).
+
+**Key findings and fixes applied in `Dockerfile.rocm64`:**
+
+| Problem | Fix |
+|---------|-----|
+| `__hip_fp8_e4m3` undefined (gfx900 has no FP8) | Shell loop replaces each `typedef __hip_fp8_* __nv_fp8_*;` with a stub struct in `vendors/hip.h` |
+| `HSA_XNACK=1` freezes entire PC | `HSA_XNACK=0` — disables xnack to prevent system hang |
+| `GGML_HIP_UMA=1` + `XNACK=0` = segfault | `GGML_HIP_UMA=0` — UMA mode requires page-fault handling which XNACK=0 disables |
+| Server only reachable inside container | `--host 0.0.0.0` passed to `llama-server` so Docker port mapping works |
+| Old ROCm 6.4.4 image: `.so.6` vs `.so.5` ABI mismatch | Use `rocm/dev-ubuntu-24.04:6.2.4` (stable, gfx900-compatible) |
+
+**Confirmed working output:**
+```
+ggml_cuda_init: found 1 ROCm devices (Total VRAM: 65536 MiB)
+  Device 0: AMD Radeon Graphics, gfx900:xnack- (0x900)
+load_tensors: offloaded 33/33 layers to GPU
+main: server is listening on http://0.0.0.0:8080
+```
+
+**Stop the container:**
+```bash
+docker stop $(docker ps -q --filter ancestor=llama-server-rocm-vega)
+```
+
+**Rebuild image after Dockerfile changes:**
+```bash
+docker rmi llama-server-rocm-vega
+./run-docker-rocm.sh /path/to/model.gguf ...
+```
+
+**Check what's using GPU memory:**
+```bash
+rocm-smi --showmeminfo vram
+fuser /dev/kfd /dev/dri/render* | tr ' ' '\n' | sort -u | \
+  xargs -I{} sh -c 'echo -n "PID {}: "; cat /proc/{}/cmdline | tr "\0" " "; echo'
+```
+The desktop compositor (GNOME Shell, Xwayland), VS Code, and Firefox each hold a small amount of VRAM (~1 GiB total). The model itself is the dominant consumer.
+
+---
 
 ### "No GPU detected" / "Failed to open /dev/kfd"
 
@@ -321,7 +367,8 @@ done
 
 ```bash
 # Test individual ops with a timeout to prevent hangs
-export HSA_OVERRIDE_GFX_VERSION=9.0.0 HSA_ENABLE_SDMA=0 HSA_XNACK=1 GGML_HIP_UMA=1
+# XNACK=0: XNACK=1 hard-freezes the Vega 8 PC
+export HSA_OVERRIDE_GFX_VERSION=9.0.0 HSA_ENABLE_SDMA=0 HSA_XNACK=0 GGML_HIP_UMA=0
 
 # SCALE test (should pass quickly)
 timeout 10 ./llama.cpp-rocm-vega/bin/test-backend-ops -o SCALE -b ROCm0
@@ -338,8 +385,8 @@ timeout 60 ./llama.cpp-rocm-vega/bin/test-backend-ops -o MUL_MAT -b ROCm0
 |----------|-------|---------|
 | `HSA_OVERRIDE_GFX_VERSION` | `9.0.0` | Make ROCm see gfx90c as gfx900 |
 | `HSA_ENABLE_SDMA` | `0` | Disable SDMA (crashes on APU iGPUs) |
-| `HSA_XNACK` | `1` | Enable xnack (required for UMA APU code objects) |
-| `GGML_HIP_UMA` | `1` | Enable Unified Memory Architecture mode |
+| `HSA_XNACK` | `0` | Disable xnack — prevents PC hard-freeze on Vega 8 iGPU (`1` freezes the entire system) |
+| `GGML_HIP_UMA` | `0` | Disable UMA mode — required when `HSA_XNACK=0` (UMA needs page-fault handling which xnack provides) |
 | `GPU_MAX_ALLOC_PERCENT` | `100` | Allow full GPU memory allocation |
 | `GPU_SINGLE_ALLOC_PERCENT` | `100` | Allow single large allocations |
 | `GPU_MAX_HEAP_SIZE` | `100` | Allow full heap usage |
@@ -373,13 +420,21 @@ Ref: [AgentZ — How to Fix ROCm Memory Faults on AMD GPUs](https://medium.com/@
 
 ## Performance Tips
 
-1. **Increase UMA VRAM in BIOS** to 16 GB:
-   - Settings → Advanced → AMD CBS → NBIO → GFX → UMA Frame Buffer Size
+1. **Unlock 64 GB GTT** via GRUB (required for large models on Vega 8 UMA):
+   Add to `/etc/default/grub` `GRUB_CMDLINE_LINUX_DEFAULT`:
+   ```
+   amdgpu.gttsize=65536 ttm.pages_limit=16777216
+   ```
+   Then `sudo update-grub && reboot`.
+   Verify: `cat /sys/kernel/debug/dri/*/vma_mm` or `rocm-smi --showmeminfo gtt`
 
-2. **Use Q4_K_M quantization** for best quality/size tradeoff
+2. **Set UMA VRAM carve-out in BIOS** to 16 GB (optional — GTT covers most use cases):
+   Settings → Advanced → AMD CBS → NBIO → GFX → UMA Frame Buffer Size
 
-3. **Try `-ngl 99`** to offload all layers to GPU, then reduce if out-of-memory
+3. **Use Q4_K_M quantization** for best quality/size tradeoff
 
-4. **Reduce context size** (`-c 2048` instead of `-c 4096`) to save VRAM
+4. **Try `-ngl 99`** to offload all layers to GPU, then reduce if out-of-memory
 
-5. **Close other GPU-using apps** (browsers, compositors) to free VRAM
+5. **Reduce context size** (`-c 2048` instead of `-c 4096`) to save VRAM
+
+6. **Close other GPU-using apps** (browsers, compositors) to free VRAM
