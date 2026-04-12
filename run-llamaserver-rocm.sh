@@ -66,16 +66,18 @@ export HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-0}
 export DRI_PRIME=pci-0000_0b_00.0
 
 # ─── Pre-flight: warn if GRUB params are missing ───
-# These kernel params fix ROCm memory faults / segfaults on AMD APUs:
-#   amdgpu.cwsr_enable=1  — disable compute wave save/restore (crash trigger)
-#   amd_iommu=on         — disable IOMMU ("page not present" faults)
-#   ttm.pages_limit=25165824 — raise TTM page limit for large allocations
+# These kernel params fix ROCm memory faults and allow mapping large amounts of RAM as VRAM:
+#   amdgpu.cwsr_enable=0     — Disable compute wave save/restore (fixes ROCm crashes on Vega APUs)
+#   amd_iommu=on             — Enable IOMMU to prevent "page not present" memory faults
+#   amdgpu.gttsize=65536     — Set Graphics Translation Table size to 64GB (amounts AMD driver wants to map)
+#   ttm.pages_limit=16777216 — Set Translation Table Maps limit to 64GB (amount kernel is allowed to give, 16.7M * 4KB)
+# Note: Both gttsize and ttm.pages_limit are required together to bypass the default 8GB limit.
 # Ref: https://medium.com/@agentz/how-to-fix-rocm-pytorch-memory-faults-on-amd-gpus-segmentation-fault-page-not-present-544b9f62f627
 CMDLINE=$(cat /proc/cmdline 2>/dev/null || true)
-if ! echo "$CMDLINE" | grep -q 'cwsr_enable=0'; then
-    echo "⚠  Kernel param 'amdgpu.cwsr_enable=1' not detected."
+if ! echo "$CMDLINE" | grep -q 'amdgpu.cwsr_enable=0'; then
+    echo "⚠  Kernel param 'amdgpu.cwsr_enable=0' not detected."
     echo "   CWSR (compute wave save/restore) can crash Vega APUs under ROCm."
-    echo "   Add to GRUB and reboot:  sudo sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=\"\(.*\)\"/GRUB_CMDLINE_LINUX_DEFAULT=\"\1 amdgpu.cwsr_enable=1 amd_iommu=on ttm.pages_limit=12582912\"/' /etc/default/grub && sudo update-grub"
+    echo "   Add to GRUB and reboot:  sudo sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=\"\(.*\)\"/GRUB_CMDLINE_LINUX_DEFAULT=\"\1 amdgpu.cwsr_enable=0 amd_iommu=on amdgpu.gttsize=65536 ttm.pages_limit=16777216\"/' /etc/default/grub && sudo update-grub"
     echo ""
 fi
 

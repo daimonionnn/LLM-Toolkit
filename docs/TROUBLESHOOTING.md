@@ -351,12 +351,20 @@ timeout 60 ./llama.cpp-rocm-vega/bin/test-backend-ops -o MUL_MAT -b ROCm0
 
 ### Kernel Boot Parameters (GRUB)
 
+
 | Parameter | Value | Purpose |
+
 |-----------|-------|---------|
-| `amdgpu.gttsize` | `8192` | Increase GTT size to 8 GB |
+
+| `amdgpu.gttsize` | `65536` | Increase GTT (Graphics Translation Table) size to 64GB. This is the max amount of system RAM the AMD driver is allowed to map as VRAM. |
+
+| `ttm.pages_limit` | `16777216` | Raise TTM (Translation Table Maps) page limit to 64GB (16,777,216 pages * 4KB). This is the max amount of RAM the Linux kernel is allowed to give to the graphics subsystem. **Note: Both `amdgpu.gttsize` and `ttm.pages_limit` must be set together to exceed the default 8GB limit.** |
+
 | `amdgpu.cwsr_enable` | `0` | Disable compute wave save/restore (fixes segfaults during inference) |
-| `amd_iommu` | `off` | Disable IOMMU (fixes "page not present" memory faults) |
-| `ttm.pages_limit` | `12582912` | Raise TTM page limit to ~48 GB (default ~23 GB is too low) |
+
+| `amd_iommu` | `on` | Enable/force IOMMU (fixes "page not present" memory faults) |
+
+
 
 These are set in `/etc/default/grub` → `GRUB_CMDLINE_LINUX_DEFAULT`, then `sudo update-grub` + reboot.
 Ref: [AgentZ — How to Fix ROCm Memory Faults on AMD GPUs](https://medium.com/@agentz/how-to-fix-rocm-pytorch-memory-faults-on-amd-gpus-segmentation-fault-page-not-present-544b9f62f627)
