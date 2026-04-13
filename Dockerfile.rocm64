@@ -21,7 +21,9 @@ RUN for HIP_FP8 in __hip_fp8_e4m3 __hip_fp8_e5m2 __hip_fp8_e4m3_fnuz __hip_fp8_e
 RUN cmake -B build \
       -DGGML_HIP=ON \
       -DAMDGPU_TARGETS="gfx900" \
-      -DCMAKE_BUILD_TYPE=Release && \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DGGML_FLASH_ATTN=ON \
+      -DGGML_HIP_GRAPHS=ON && \
     cmake --build build --config Release -j$(nproc)
 
 # ROCm environment for Vega 8 APU

@@ -34,3 +34,7 @@ docker run --rm -it \
   "$IMAGE_NAME" \
   --host 0.0.0.0 \
   -m "/models/$MODEL_NAME" "$@"
+  -fa 1 \  
+  -nkvo \
+#  --ipc=host \
+#  --ulimit memlock=-1 \

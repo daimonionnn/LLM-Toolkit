@@ -28,7 +28,7 @@
 ### Server Configuration
 
 ```bash
-./run-docker-rocm.sh .../Qwen3.5-35B-A3B-Q4_K_M.gguf -ngl 99 -c 2048 --no-warmup
+./run-docker-rocm.sh .../Qwen3.5-35B-A3B-Q4_K_M.gguf -ngl 99 -c 4096
 ```
 
 | Setting | Value |
@@ -84,7 +84,7 @@
 ### Server Configuration
 
 ```bash
-./run-llamaserver-vulkan.sh .../Qwen3.5-35B-A3B-Q4_K_M.gguf -ngl 99 -c 2048
+./run-llamaserver-vulkan.sh .../Qwen3.5-35B-A3B-Q4_K_M.gguf -ngl 99 -c 4096
 ```
 
 ### Results
