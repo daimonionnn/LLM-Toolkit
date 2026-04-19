@@ -86,6 +86,21 @@ Key env vars baked into `Dockerfile.rocm64`:
 | `HSA_OVERRIDE_GFX_VERSION` | `9.0.0` | Treat gfx90c as gfx900 |
 | `GPU_MAX_ALLOC_PERCENT` | `100` | Allow full GTT allocation |
 
+### Docker & `llama.cpp` Runtime Optimizations
+
+The `run-docker-rocm.sh` script applies several crucial flags to maximize inference speed for the ROCm container on your APU:
+
+#### Docker Flags
+* `--ipc=host`: Essential for ROCm containers. Bypasses standard shared memory limits, allowing the GPU/CPU to exchange data structures continuously without bottlenecks.
+* `--security-opt seccomp=unconfined`: Disables Docker's default syscall filtering. When passing raw character devices (`/dev/kfd`, `/dev/dri`), seccomp adds overhead; removing it grants native bare-metal performance.
+* `--ulimit memlock=-1`: Allows unlimited locked memory pages. ROCm relies on memory pinning to stream data between system RAM and the GPU cores without CPU pagetable management. Docker's default limit severely bottlenecks ROCm or causes crashes.
+
+#### `llama.cpp` Flags
+* `-fa 1` (Flash Attention): Significantly reduces memory bandwidth overhead and allows larger context sizes. Essential for APUs where memory bandwidth is the primary bottleneck.
+* `-ngl 99`: Offloads all layers to the GPU.
+* `-t N` (Recommended to add at runtime): Set to your physical CPU core count (e.g., `-t 4` or `-t 8`). Prevents CPU thrashing and saves thermal/power budget for the Vega iGPU.
+* `-nkvo` (`--no-kv-offload`): **Do not use unless necessary!** Forces the Key-Value (KV) cache to stay in standard CPU RAM instead of VRAM. Only use this if your model is so large that adding a context window crashes the GPU with Out-of-Memory (OOM) errors.
+
 See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#docker-rocm-workaround-working-solution) for full details and the FP8 stub patch needed for gfx900.
 
 ## LM Studio (Vulkan)
