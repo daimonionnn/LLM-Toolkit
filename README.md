@@ -1,4 +1,4 @@
-# LLM Inference Toolkit for Linux — Vulkan/ROCm/CUDA management for AMD APU + dGPU
+# LLM Inference Toolkit for Linux — Vulkan/ROCm/CUDA management for AMD APU + dGPU (ROCm for AMD APUs or older AMD GPUs)
 
 Personal toolkit for running local LLMs on a dual-GPU system using llama.cpp (Llama Server) and LM Studio.
 
@@ -171,6 +171,5 @@ LLM-Toolkit/
 - [x] **Create Vulkan launcher scripts**
 - [x] Benchmark all backends (ROCm Docker, Vulkan native, CPU, LM Studio)
 - [x] Document all findings
-- [ ] Test 70B models on Vega 8 (should fit in 64 GB GTT)
 - [ ] Benchmark with flash attention enabled
 - [ ] Install official AMD ROCm on host to eliminate Docker dependency

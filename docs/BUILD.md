@@ -192,17 +192,44 @@ You can run llama-server alongside LM Studio and connect to it as a remote endpo
 
 > **Warning:** This may break LM Studio. Back up first.
 
+You will need `patchelf` to fix library paths so the backend can find its dependencies. If you don't have it installed:
+```bash
+python3 -m pip install --user --break-system-packages patchelf
+```
+
 ```bash
 BACKEND="$HOME/.lmstudio/extensions/backends/llama.cpp-linux-x86_64-amd-rocm-avx2-2.13.0"
 
 # Backup
 cp -a "$BACKEND" "$BACKEND.bak"
 
-# Replace libs
-cp llama.cpp-rocm-vega/lib/libggml-hip.so "$BACKEND/"
-cp llama.cpp-rocm-vega/lib/libggml-base.so "$BACKEND/"
-cp llama.cpp-rocm-vega/lib/libggml-cpu.so "$BACKEND/"
-cp llama.cpp-rocm-vega/lib/libllama.so "$BACKEND/"
+# Replace libs (including versioned symlinks)
+cp -a llama.cpp-rocm-vega/lib/libggml*.so* "$BACKEND/"
+cp -a llama.cpp-rocm-vega/lib/libllama*.so* "$BACKEND/"
+
+# Fix RUNPATH for dependencies so LM Studio's engine can find them
+for f in "$BACKEND"/*.so; do
+    if [ -f "$f" ] && [ ! -L "$f" ]; then
+        ~/.local/bin/patchelf --set-rpath '$ORIGIN' "$f"
+    fi
+done
 ```
 
 This is risky due to potential ABI mismatches between our build and LM Studio's engine. The standalone server approach is much safer.
+
+### Troubleshooting: "Exit code: null"
+If you load a model in LM Studio and immediately get a silent crash (`Exit code: null`), the ROCm driver sequence is segfaulting because LM Studio did not load with the necessary hardware override variables. 
+
+To fix this, you must **close LM Studio completely** and launch it from a terminal where the environment variables are exported:
+
+```bash
+export HSA_OVERRIDE_GFX_VERSION=9.0.0
+export HSA_ENABLE_SDMA=0
+export HSA_XNACK=0
+export GGML_HIP_UMA=0
+
+# Now launch LM Studio from this terminal!
+# (e.g. run `lmstudio` or `/path/to/LM_Studio.AppImage`)
+```
+
+If it continues to crash even with these variables, rollback the backend to the `.bak` folder and rely on the **Docker standalone server** (Option A) to handle the GPU inference safely.

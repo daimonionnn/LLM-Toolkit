@@ -29,12 +29,15 @@ docker run --rm -it \
   --device=/dev/dri \
   --group-add=video \
   --group-add=render \
+  --ipc=host \
+  --security-opt seccomp=unconfined \
+  --ulimit memlock=-1 \
   -v "$MODEL_DIR:/models:ro" \
   -p 8080:8080 \
   "$IMAGE_NAME" \
   --host 0.0.0.0 \
-  -m "/models/$MODEL_NAME" "$@"
-  -fa 1 \  
-  -nkvo \
-#  --ipc=host \
-#  --ulimit memlock=-1 \
+  -m "/models/$MODEL_NAME" \
+  -fa 1 \
+  -ngl 99 \
+# --no-kv-offload
+  "$@"
