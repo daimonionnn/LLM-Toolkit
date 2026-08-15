@@ -220,6 +220,7 @@ bash run/run-rocm7-baremetal.sh /path/to/model.gguf -ngl 99 -c 8192
 ```
 amd-vega-rocm-vulkan-llm-toolkit/
 ├── README.md
+├── LICENSE                             ← MIT
 ├── run/
 │   ├── start-llama-server.sh          ← Main launcher (ROCm 7.2 baremetal default)
 │   ├── run-docker-rocm.sh             ← Docker ROCm 6.2.4 launcher (working, auto-selects Vega 8)
@@ -301,3 +302,12 @@ amd-vega-rocm-vulkan-llm-toolkit/
 - [ ] **Future accelerator (AMD or NVIDIA dGPU)** — the R9700s are on their way out (one sold July 2026, the second — which had hardware issues — may follow). If a dGPU returns: benchmark it on this same harness and use it as the draft-model device for speculative decoding on the Vega 8 (`--device-draft`)
 - [ ] **Restore baremetal ROCm on Vega 8 under modular ROCm:** needs rocBLAS/Tensile built from source for gfx90c (no override, native arch) — large effort, Docker path covers the use case meanwhile
 - [ ] **Future / community:** Vega 56/64 (gfx900) and Radeon VII/MI50/MI60 (gfx906) discrete GPU support — PyTorch, ComfyUI, vLLM. See [docs/ARCHITECTURE.md — Future: Vega 56/64](docs/ARCHITECTURE.md) and [mixa3607/ML-gfx906](https://github.com/mixa3607/ML-gfx906). Forks and PRs welcome.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+This repo contains only scripts, Dockerfiles and documentation. It builds
+[llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT) from upstream source and uses AMD's
+ROCm packages and Docker images, each under their own licenses — nothing from those projects
+is redistributed here.
