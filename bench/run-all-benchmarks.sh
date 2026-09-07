@@ -27,6 +27,12 @@ MODELS=(
     "$HOME/.lmstudio/models/lmstudio-community/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_K_M.gguf"
 )
 
+# Override the model list for a single run without editing this file:
+#   BENCH_MODELS="/path/a.gguf /path/b.gguf" bash bench/run-all-benchmarks.sh
+if [ -n "${BENCH_MODELS:-}" ]; then
+    read -r -a MODELS <<< "$BENCH_MODELS"
+fi
+
 # llama-server port (all backends share the same port sequentially)
 SERVER_PORT=8080
 
@@ -71,10 +77,10 @@ ENABLED_BACKENDS=(
     #"ROCm-6.2.4-Docker-FA-OFF:-fa 0:start_rocm6_docker"
     #"ROCm-6.2.4-Docker-FA-ON:-fa 1:start_rocm6_docker"
 
-    # ── ROCm 7.2 bare-metal (needs ROCm 7.2 + gfx900 backport on the host;
-    #    broken since the host moved to modular ROCm 7.13+/gfx120x packages) ──
-    #"ROCm-7.2-Baremetal-FA-OFF:-fa 0:start_rocm7_baremetal"
-    #"ROCm-7.2-Baremetal-FA-ON:-fa 1:start_rocm7_baremetal"
+    # ── ROCm 7.2 bare-metal (needs classic ROCm 7.0-7.2 + gfx900 backport on
+    #    the host; working again since September 2026) ──────────────────────
+    "ROCm-7.2-Baremetal-FA-OFF:-fa 0:start_rocm7_baremetal"
+    "ROCm-7.2-Baremetal-FA-ON:-fa 1:start_rocm7_baremetal"
 
     # ── ROCm 6.2.4 bare-metal (uncomment when host ROCm stack is working) ────
     # "ROCm-6.2.4-Baremetal-FA-OFF:-fa 0:start_rocm6_baremetal"
@@ -88,6 +94,12 @@ ENABLED_BACKENDS=(
     "CPU-FA-ON:-fa 1:start_cpu"
     "CPU-FA-OFF:-fa 0:start_cpu"
 )
+
+# Override the backend list for a single run (one entry per line):
+#   BENCH_BACKENDS=$'CPU-FA-ON:-fa 1:start_cpu' bash bench/run-all-benchmarks.sh
+if [ -n "${BENCH_BACKENDS:-}" ]; then
+    mapfile -t ENABLED_BACKENDS <<< "$BENCH_BACKENDS"
+fi
 
 # =============================================================================
 # ── BACKEND START FUNCTIONS ───────────────────────────────────────────────────
@@ -251,9 +263,18 @@ start_vulkan_gpu() {
     SERVER_PID=$!
 }
 
+# CPU-only means -dev none, NOT -ngl 0.
+#
+# Upstream changed the -ngl default to 'auto', and on this build `-ngl 0` no
+# longer keeps the model off the GPU: measured on 2026-09-07 with gemma-4-E4B,
+# `-ngl 0` still gave 91 % GPU busy and 6567 MB of GTT, while `-dev none` gave
+# 157 MB and left the GPU idle. Benchmarks taken with `-ngl 0` on current
+# llama.cpp are therefore GPU runs mislabelled as CPU runs — which is exactly
+# what made the 2026-09-07 "CPU" rows land near the Vulkan numbers instead of
+# the much higher historical CPU prefill.
 start_cpu() {
     local fa_flag="$1"
-    echo "  [start] CPU only — native Vulkan binary, -ngl 0 | $fa_flag | -c $CONTEXT_SIZE"
+    echo "  [start] CPU only — native Vulkan binary, -dev none | $fa_flag | -c $CONTEXT_SIZE"
     pkill -f "llama-server.*port $SERVER_PORT" 2>/dev/null || true
     sleep 1
 
@@ -261,7 +282,7 @@ start_cpu() {
         "$REPO_DIR/llm/vulkan/bin/llama-server" \
         -m "$CURRENT_MODEL" \
         $fa_flag \
-        -ngl 0 \
+        -dev none \
         -c "$CONTEXT_SIZE" \
         --host 0.0.0.0 \
         --port "$SERVER_PORT" \
@@ -284,8 +305,9 @@ _detect_vega8_render_node() {
             return 0
         fi
     done
-    # Fallback: known Vega 8 node on this machine (June 2026, with 2× R9700)
-    echo "/dev/dri/renderD130"
+    # Fallback: known Vega 8 node on this machine (September 2026, single GPU).
+    # This value has changed three times; the PCI-ID scan above is what to rely on.
+    echo "/dev/dri/renderD128"
 }
 
 # 0-based GPU index of the Vega 8 in rocminfo agent order (= ROCR index).
@@ -304,7 +326,13 @@ _detect_vega8_rocm_index() {
     "$rocminfo_bin" 2>/dev/null | awk '
         $1 == "Name:" && $2 ~ /^gfx/  { name = $2 }
         /Device Type:[[:space:]]+GPU/ {
-            if (name ~ /^gfx90[029c]$/) { print gpu; found = 1; exit }
+            # print gpu+0, not gpu: when the Vega 8 is the first GPU its index
+            # is 0 and `gpu` was never assigned, so bare `print gpu` emits an
+            # EMPTY string. That becomes ROCR_VISIBLE_DEVICES="", which hides
+            # every GPU and silently falls back to CPU ("no usable GPU found").
+            # Masked until September 2026, when the dGPUs left and the Vega
+            # became index 0 for the first time.
+            if (name ~ /^gfx90[029c]$/) { print gpu+0; found = 1; exit }
             gpu++
         }
         END { if (!found) print 0 }

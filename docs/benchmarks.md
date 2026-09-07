@@ -2,31 +2,125 @@
 
 Compact benchmark log for llama.cpp on AMD Ryzen 7 5700G / Radeon Vega 8. Latest run is first; older results are kept where they explain behaviour changes.
 
+## Re-verification after the 26.04 reinstall — 2026-09-07
+
+Same model and same harness as the 2026-05-15 gemma rows, so these are directly
+comparable. Ubuntu 26.04.1 / kernel 7.0 / classic ROCm 7.2.0, Vega 8 as the only GPU
+(`card0`, ROCm index 0), BIOS carve-out 2 GB, **64 GB GTT** (the May rows were recorded
+at 32 GB GTT). Thermals logged throughout with `bench/log-thermals.sh`.
+
+The numbers below are from the **post-cooling-fix run** — fan speed was raised after an
+identical earlier sweep showed the chip throttling (see Thermals). That earlier sweep
+measured 6–8 % lower prefill across every GPU backend, so treat any figure recorded
+while this rig is throttling as a floor, not a result.
+
+### gemma-4-E4B-it-Q4_K_M (`-c 8192`), prefill / decode t/s at ~128 / ~1024 / ~4096
+
+| Backend | FA | Prefill | Decode | vs. 2026-05-15 |
+| ------- | -- | ------- | ------ | -------------- |
+| **Vulkan GPU** | ON | **124.23 / 170.73 / 171.29** | **17.55 / 17.16 / 16.36** | reproduces, slightly ahead (May: 121.97 / 166.81 / 160.02) |
+| Vulkan GPU | OFF | 95.60 / 149.48 / 155.30 | 17.19 / 16.39 / 14.29 | — |
+| **ROCm 7.2 baremetal** | OFF | **56.46 / 89.10 / 87.16** | **14.28 / 12.91 / 10.63** | reproduces at 1K/4K (May: 70.91 / 84.88 / 84.95); ~128 stays low |
+| ROCm 7.2 baremetal | ON | 55.23 / 47.36 / 27.11 | 14.32 / 13.31 / 11.44 | FA ON collapses prefill — as documented |
+| CPU (`-dev none`) | ON | 95.38 / 94.66 / 88.37 | 15.05 / 14.24 / 12.05 | decode reproduces; **prefill does not** (May: 249.57 / 754.82 / 840.50) |
+| CPU (`-dev none`) | OFF | 94.88 / 93.23 / 84.69 | 14.95 / 14.39 / 13.44 | — |
+
+**Vulkan and ROCm both reproduce**, which is the main result: the restored stack performs
+as it did before the reinstall. Vulkan remains the best path — use `-fa 1` for Vulkan and
+`-fa 0` for ROCm.
+
+### The CPU rows were measuring the GPU
+
+`start_cpu()` used `-ngl 0`, which no longer keeps the model off the GPU — upstream
+changed the `-ngl` default to `auto`. Measured directly on this build:
+
+| Flag | GPU busy | GTT used |
+| ---- | -------- | -------- |
+| `-ngl 0` | 91 % | 6567 MB |
+| `-dev none` | idle | 157 MB |
+
+So every `-ngl 0` "CPU" row on current llama.cpp is a GPU run with a CPU label — which is
+why the first attempt landed near the Vulkan figure instead of anywhere near the
+historical CPU numbers. Fixed to `-dev none`; the CPU rows above are genuine (GTT 157 MB,
+iGPU idle while the CPU is under full load).
+
+### Unresolved: CPU prefill is ~10× below the May figure
+
+With real CPU-only execution and no throttling, prefill measures **85–95 t/s**, stable
+across 8 and 16 threads, cold and warm start, harness and direct `llama-bench`. May
+recorded 840 t/s at 4096. Decode reproduces fine (12.05 vs 12.17), so this is specific to
+prefill, and raising cooling did not close it.
+
+Not explained. Two observations, neither conclusive:
+
+- The May shape (249 → 755 → 840, rising 3.4× with context) is not how prefill behaves;
+  throughput normally flattens or falls as context grows, which is what the current
+  numbers do (95 → 95 → 88).
+- The model is **7.52 B** parameters total. Sustaining 840 tok/s prefill implies roughly
+  12 TFLOP/s; a 5700G's 8 Zen 3 cores on AVX2 are an order of magnitude below that. The
+  measured ~90 t/s corresponds to ~1.3 TFLOP/s, which is the right order for this chip.
+
+That points at the May figure being an artefact rather than a regression, but the binary
+and config that produced it were wiped by the reinstall, so it cannot be checked. Treat
+the historical CPU prefill rows as suspect until someone reproduces them.
+
+### Thermals — before and after raising fan speed
+
+Two identical 6-backend sweeps on the same rig, the second after the fan curve was raised:
+
+| | Before | After |
+| --- | ------ | ----- |
+| Idle | ~50 °C | **40–41 °C** |
+| Peak under load | **105.4 °C** | **89.5 °C** |
+| Average under load | 90.5 °C | **79.7 °C** |
+| Samples ≥ 95 °C (Tjmax) | 27 | **0** |
+| Samples ≥ 100 °C | 22 | **0** |
+| iGPU SCLK under load | 2400 → 2208 MHz | **2400 → 2351 MHz** |
+| CPU clocks | 4000 → 3450 MHz | no downward drift |
+
+The chip no longer exceeds Tjmax and no longer throttles. This also recovered real
+throughput — prefill rose ~6 % on Vulkan, ~8 % on ROCm and ~7 % on CPU purely from
+running cooler, which is why the pre-fix numbers are not published above.
+
+> The CPU phase is not a strict A/B between the two sweeps: the earlier one still had the
+> `-ngl 0` bug, so its "CPU" rows ran on the GPU. The Vulkan and ROCm phases are identical
+> workloads in both, and carry the comparison.
+
+> Peak is still 89.5 °C, which is warm for a 65 W APU. A repaste is worth doing; the fan
+> change fixed the throttling but the headroom to Tjmax is only ~5 °C.
+
+---
+
 ## Current Status — 2026-05-15
 
 **Latest run:** `bench/run-all-benchmarks.sh`, completed `12 / 12` backend × model combinations at `2026-05-15 00:26`.
 
-> **Environment changes since this run (June 2026):** the RTX 5090 was removed and a
-> second Radeon AI PRO R9700 added — the Vega 8 is now `/dev/dri/renderD130` and ROCm
-> GPU index 2 (the parameters below record the May 2026 layout). The host's classic
-> ROCm 7.2 was replaced by modular `amdrocm-core` 7.13/7.14 (gfx120x), which **breaks
-> the ROCm 7 baremetal rows' reproducibility on this host** — use the Docker ROCm
-> backends instead (re-verified working 2026-06-13). The benchmark runner has also been
-> changed to auto-detect the Vega 8 index and to use the documented-safe HSA env
-> (`HSA_XNACK=0`, `HSA_ENABLE_SDMA=0` — the run below used `XNACK=1`/`SDMA=1`), so
-> future baremetal numbers may differ slightly.
+> **Environment changes since this run (September 2026):** two rounds of changes.
+> *June 2026* — the RTX 5090 was removed and a second R9700 added (Vega 8 became
+> `renderD130` / ROCm index 2), and classic ROCm 7.2 was replaced by modular
+> `amdrocm-core` 7.13/7.14, which broke the baremetal rows on that host.
+> *September 2026* — both R9700s moved to another machine and the OS was reinstalled
+> as Ubuntu 26.04 / kernel 7.0 with classic ROCm 7.2.0 restored. The Vega 8 is now the
+> **only** GPU: `card0` / `/dev/dri/renderD128` / ROCm index **0**, and the baremetal
+> path works again (re-verified 2026-09-07).
+>
+> The rows below therefore record the May 2026 layout and are **not** directly
+> reproducible today: different OS, different kernel, different device indices, and a
+> benchmark runner since changed to auto-detect the Vega index and use the
+> documented-safe HSA env (`HSA_XNACK=0`, `HSA_ENABLE_SDMA=0` — the run below used
+> `XNACK=1`/`SDMA=1`). Treat them as historical baselines, not as current numbers.
 
 ### Current benchmark parameters
 
 | Area                         | Current setting                                                                                                      |
 | ---------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | BIOS UMA / iGPU VRAM         | **2 GB**                                                                                                             |
-| OS / kernel                  | Ubuntu 25.10, kernel 6.17                                                                                            |
+| OS / kernel                  | Ubuntu 25.10, kernel 6.17 *(run-time; host is now Ubuntu 26.04 / kernel 7.0)*                                        |
 | CPU                          | AMD Ryzen 7 5700G, 8C/16T, Zen 3, AVX2/FMA — slight undervolt: Curve Optimizer all-core offset −10                   |
 | RAM                          | 64 GB DDR4 — 2× 32 GB Kingston Fury 3600 MT/s overclocked to **4200 MT/s** (UMA-shared with the iGPU; decode is memory-bandwidth-bound, so slower RAM ⇒ proportionally slower decode) |
 | Motherboard                  | ASRock Fatal1ty B450 Gaming-ITX/ac                                                                                   |
-| Target GPU                   | Radeon Vega 8 iGPU, gfx90c/gfx900-compatible (`/dev/dri/renderD129` at run time; `renderD130` as of June 2026)       |
-| Other GPUs                   | RX 9700 AI Pro present but not used by benchmark scripts (June 2026: 2× R9700, RTX 5090 removed)        |
+| Target GPU                   | Radeon Vega 8 iGPU, gfx90c/gfx900-compatible (`/dev/dri/renderD129` at run time; `renderD130` June 2026; **`renderD128` now**) |
+| Other GPUs                   | RX 9700 AI Pro present at run time but not used by benchmark scripts (June 2026: 2× R9700, RTX 5090 removed; **none present since September 2026**) |
 | Context                      | `-c 8192`                                                                                                            |
 | Prompt sizes                 | `128`, `1024`, `4096` requested; effective prompts about `140/141`, `937`, `3330` tokens                             |
 | Decode length                | `50` generated tokens                                                                                                |
@@ -197,8 +291,8 @@ Smaller model; all GPU backends fully offload.
 
 | Backend                | FA    | ~128 tok | ~1024 tok | ~4096 tok | vs previous comparable run                                      |
 | ---------------------- | ----- | -------: | --------: | --------: | ---------------------------------------------------------------- |
-| CPU                    | OFF   |   235.17 |    693.91 |    772.09 | Slightly lower than best previous CPU run                        |
-| CPU                    | ON ✅  |   249.57 |    754.82 |    840.50 | Best prefill overall                                             |
+| CPU                    | OFF ⚠️  |   235.17 |    693.91 |    772.09 | ⚠️ Suspect — see below                                            |
+| CPU                    | ON ⚠️  |   249.57 |    754.82 |    840.50 | ⚠️ **Did not reproduce 2026-09-07** (measured 95 / 95 / 88 with verified CPU-only execution, no throttling). Both CPU prefill rows here are suspect; decode reproduced fine |
 | ROCm 7.2 baremetal     | OFF ✅ |    70.91 |     84.88 |     84.95 | Close to previous; still recommended ROCm mode                   |
 | ROCm 7.2 baremetal     | ON ⚠  |    65.77 |     47.70 |     27.67 | FA still severely hurts ROCm prefill                             |
 | Vulkan GPU             | OFF   |    91.11 |    143.58 |    147.37 | Strong GPU path                                                  |
@@ -255,7 +349,7 @@ These tables preserve important previous runs without repeating every per-backen
 | ---------- | -------------------------------------- | -------------------- | --- | ----------------------------- | ---------------------------- | ------------------------------------- |
 | 2026-05-15 | BIOS 2GB;32GB GTT,current ROCm tweaks  | Vulkan GPU           | ON  | 121.97 / 166.81 / 160.02      | 16.97 / 16.56 / 15.84        | Latest best GPU path                  |
 | 2026-05-15 | BIOS 2GB;32GB GTT,current ROCm tweaks  | ROCm 7.2 baremetal   | OFF | 70.91 / 84.88 / 84.95         | 14.50 / 13.15 / 10.89        | Latest recommended ROCm               |
-| 2026-05-15 | BIOS 2GB;32GB GTT,current ROCm tweaks  | CPU                  | ON  | 249.57 / 754.82 / 840.50      | 15.06 / 14.24 / 12.17        | Latest best prefill                   |
+| 2026-05-15 | BIOS 2GB;32GB GTT,current ROCm tweaks  | CPU                  | ON  | 249.57 / 754.82 / 840.50 ⚠️     | 15.06 / 14.24 / 12.17        | ⚠️ **Prefill suspect** — did not reproduce 2026-09-07 (measured 95 / 95 / 88 with verified CPU-only execution and no thermal throttling); decode did reproduce. See the 2026-09-07 section |
 | 2026-05-14 | 16 GB BIOS carveout, no 64 GB GTT      | Vulkan GPU           | ON  | 115.76 / 158.83 / 156.18      | 14.73 / 14.55 / 14.03        | Earlier best GPU; latest is faster decode |
 | 2026-05-14 | 16 GB BIOS carveout, no 64 GB GTT      | ROCm 7.2 baremetal   | OFF | 67.96 / 81.96 / 81.77         | 13.32 / 12.19 / 10.00        | Prior baremetal baseline              |
 | 2026-05-14 | 16 GB BIOS carveout, no 64 GB GTT      | CPU                  | ON  | 257.48 / 810.80 / 923.35      | 12.33 / 11.90 / 10.10        | Highest recorded Gemma prefill        |

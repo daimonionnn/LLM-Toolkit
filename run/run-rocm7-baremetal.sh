@@ -74,7 +74,13 @@ detect_vega8_rocm_index() {
     "$rocminfo_bin" 2>/dev/null | awk '
         $1 == "Name:" && $2 ~ /^gfx/  { name = $2 }
         /Device Type:[[:space:]]+GPU/ {
-            if (name ~ /^gfx90[029c]$/) { print gpu; found = 1; exit }
+            # print gpu+0, not gpu: when the Vega 8 is the first GPU its index
+            # is 0 and `gpu` was never assigned, so bare `print gpu` emits an
+            # EMPTY string. That becomes ROCR_VISIBLE_DEVICES="", which hides
+            # every GPU and silently falls back to CPU ("no usable GPU found").
+            # Masked until September 2026, when the dGPUs left and the Vega
+            # became index 0 for the first time.
+            if (name ~ /^gfx90[029c]$/) { print gpu+0; found = 1; exit }
             gpu++
         }
         END { if (!found) print 0 }

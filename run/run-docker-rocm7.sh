@@ -30,7 +30,7 @@ shift
 
 # ── Detect Vega 8 render node by PCI device ID ───────────────────────────────────────
 # Ryzen 5700G Vega 8 = PCI device ID 0x1638 (gfx90c). The render node number
-# moves when discrete GPUs change (renderD130 as of June 2026) — hence PCI-ID
+# moves when discrete GPUs change (renderD128 as of September 2026) — hence PCI-ID
 # detection. Override with VEGA8_RENDER_NODE=/dev/dri/renderDXXX if it fails.
 # TODO: this detection block is copy-pasted in run-docker-rocm.sh,
 #       bench/run-all-benchmarks.sh, bench/tune-rocm7-vega.sh and

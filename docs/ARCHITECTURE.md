@@ -7,13 +7,17 @@ Technical background on GPU inference for this system.
 | Component | Details |
 |-----------|---|
 | CPU | AMD Ryzen 7 5700G (8C/16T, Zen 3) |
-| iGPU | AMD Radeon Vega 8 (gfx90c, 8 CUs, UMA — 16 GB BIOS carve-out / up to 64 GB GTT after GRUB tuning) — `/dev/dri/renderD130`, PCI ID `0x1638` |
-| dGPU 1 | AMD Radeon AI PRO R9700 (RDNA4 / gfx1201, 32 GB VRAM) — `/dev/dri/renderD128`, PCI ID `0x7551` |
-| dGPU 2 | AMD Radeon AI PRO R9700 (RDNA4 / gfx1201, 32 GB VRAM) — `/dev/dri/renderD129`, PCI ID `0x7551` |
+| iGPU | AMD Radeon Vega 8 (gfx90c, 8 CUs, UMA — 2 GB BIOS carve-out / up to 64 GB GTT after GRUB tuning) — `card0` / `/dev/dri/renderD128`, PCI ID `0x1638` |
+| dGPU | none — both R9700s moved to another machine (September 2026) |
 | RAM | 64 GB DDR4 (shared with Vega 8 iGPU) |
-| OS | Ubuntu 25.10 (Questing), kernel 6.17 |
+| OS | Ubuntu 26.04.1 LTS (Resolute Raccoon), kernel 7.0 |
+| ROCm | 7.2.0, classic packages from repo.radeon.com (noble/24.04) |
 
-(June 2026 configuration — the RTX 5090 was removed and a second R9700 added in May 2026, which shifted the Vega 8 from `renderD129` to `renderD130` and its ROCm GPU index from 1 to 2.)
+(September 2026 configuration. Device numbering here is history-dependent and worth
+distrusting: the Vega 8 has been `renderD129`, then `renderD130` with two R9700s
+installed, and is `renderD128` now that it is alone — and the 26.04 reinstall moved it
+from `card1` to `card0` with no hardware change at all. Every script in this repo
+therefore resolves it by PCI ID `0x1638`, never by node number.)
 
 ### Vulkan devices
 
@@ -224,12 +228,12 @@ The known-bad paths remain useful for historical context:
 With three AMD GPUs on the system, ROCm enumerates all of them as HSA agents (GPU 0+1 = R9700s, GPU 2 = Vega 8). Without explicit selection, it picks an R9700 (32 GB VRAM) instead of the Vega 8 (64 GB UMA).
 
 `run/start-llama-server.sh` delegates to wrappers that handle this automatically:
-1. Baremetal ROCm 7 parses `rocminfo` agent order to find the gfx90x APU and sets `ROCR_VISIBLE_DEVICES` to its index — 2 on this machine (`HIP_VISIBLE_DEVICES=0` inside that mask). Override: `VEGA8_ROCM_DEVICE=N`.
+1. Baremetal ROCm 7 parses `rocminfo` agent order to find the gfx90x APU and sets `ROCR_VISIBLE_DEVICES` to its index — 0 now that the Vega 8 is the only GPU, 2 when the two R9700s were installed (`HIP_VISIBLE_DEVICES=0` inside that mask). Override: `VEGA8_ROCM_DEVICE=N`.
 2. Docker ROCm scans `/sys/class/drm/renderD*/device/device` for PCI ID `0x1638` (Vega 8).
-3. Docker passes **only** the Vega 8 render node (`/dev/dri/renderD130`) into the container — the R9700s are invisible there.
+3. Docker passes **only** the Vega 8 render node (`/dev/dri/renderD128`) into the container.
 4. Vulkan auto-detects the `RADV RENOIR` device from `llama-server --list-devices`.
 
-If Docker auto-detect fails: `VEGA8_RENDER_NODE=/dev/dri/renderD130 ./run/run-docker-rocm7.sh model.gguf`
+If Docker auto-detect fails: `VEGA8_RENDER_NODE=/dev/dri/renderD128 ./run/run-docker-rocm7.sh model.gguf`
 
 ## SDMA and APU Quirks
 
@@ -354,7 +358,7 @@ Both models crash identically, confirming it's not model-specific:
 | `run/start-llama-server.sh` | **Vulkan (Vega 8, RADV) — default** | Best decode (~20 t/s gen); no host-ROCm dependency |
 | `run/start-llama-server.sh --cpu` | CPU-only | Best prefill at large context |
 | `run/start-llama-server.sh --rocm-docker` | ROCm 7.2 Docker | Best GPU prefill (~84 t/s @4K with `-ub 2048`); **needs 64 GB GTT** |
-| `run/start-llama-server.sh --rocm` | ROCm 7.2 baremetal | Classic-ROCm 7.0–7.2 hosts only — broken on modular ROCm (this host) |
+| `run/start-llama-server.sh --rocm` | ROCm 7.2 baremetal | Classic-ROCm 7.0–7.2 hosts only — working here again since September 2026; aborts early on modular ROCm |
 | `run/run-llamaserver-vulkan.sh` | Vulkan | Direct launcher with full device options |
 | `run/run-docker-rocm.sh` | ROCm 6.2.4 (Docker) | **Working ROCm GPU offload — auto-selects Vega 8** |
 | `run/run-docker-rocm7.sh` | ROCm 7.2 (Docker) | **Confirmed working 2026-05-14 — 35B full offload, sustained inference stable** |

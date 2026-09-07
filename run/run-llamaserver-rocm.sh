@@ -73,7 +73,7 @@ export HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-0}
 # NOTE: do NOT add amdgpu.cwsr_enable=0 — testing (see docs/benchmarks.md)
 # showed it prevents the large Qwen model from loading. Leave CWSR at default.
 CMDLINE=$(cat /proc/cmdline 2>/dev/null || true)
-if ! echo "$CMDLINE" | grep -q 'amdgpu.gttsize'; then
+if [[ " $CMDLINE " != *" amdgpu.gttsize="* ]]; then
     echo "⚠  Kernel param 'amdgpu.gttsize=65536' not detected."
     echo "   Large models (>8 GB) need a bigger GTT. Add to GRUB and reboot:"
     echo "   sudo sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=\"\(.*\)\"/GRUB_CMDLINE_LINUX_DEFAULT=\"\1 amdgpu.gttsize=65536 ttm.pages_limit=16777216\"/' /etc/default/grub && sudo update-grub"

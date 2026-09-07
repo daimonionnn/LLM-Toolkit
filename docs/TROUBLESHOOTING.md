@@ -16,9 +16,14 @@ This shows:
 
 ---
 
-## Multi-GPU: Targeting Vega 8 with Radeon AI PRO R9700s also present
+## Multi-GPU: Targeting the Vega 8 when dGPUs are also present
 
-With three AMD GPUs (`/dev/dri/renderD128`/`renderD129` = R9700s, `/dev/dri/renderD130` = Vega 8 iGPU — June 2026 layout), ROCm picks the wrong GPU without explicit selection. Render node numbers shift whenever dGPUs are added or removed, which is why all scripts detect by PCI ID instead of hardcoding a node.
+> **Current rig (September 2026): single GPU.** The Vega 8 is alone at
+> `/dev/dri/renderD128` / `card0`, ROCm index 0, so nothing here is needed today.
+> Kept because the numbering *will* move again — this section is what to read when
+> a dGPU is added back.
+
+With several AMD GPUs present, ROCm picks the wrong one without explicit selection. Render node numbers shift whenever dGPUs are added or removed — and, as the 26.04 reinstall showed, they can move even without a hardware change. That is why all scripts detect by PCI ID instead of hardcoding a node.
 
 ### Docker scripts (automatic)
 
@@ -27,12 +32,12 @@ With three AMD GPUs (`/dev/dri/renderD128`/`renderD129` = R9700s, `/dev/dri/rend
 ```bash
 # Auto-detect confirmed: looks for PCI ID 0x1638 (Vega 8)
 ./run/run-docker-rocm.sh /path/to/model.gguf
-# → "  Vega 8 render node: /dev/dri/renderD130"
+# → "  Vega 8 render node: /dev/dri/renderD128"
 ```
 
 If auto-detect fails (different APU revision / PCI ID):
 ```bash
-VEGA8_RENDER_NODE=/dev/dri/renderD130 ./run/run-docker-rocm.sh /path/to/model.gguf
+VEGA8_RENDER_NODE=/dev/dri/renderD128 ./run/run-docker-rocm.sh /path/to/model.gguf
 ```
 
 To identify your render nodes:
@@ -43,6 +48,10 @@ for node in /sys/class/drm/renderD*/device; do
     vendor=$(cat "$node/vendor" 2>/dev/null)
     echo "$render  vendor=$vendor  device=$dev"
 done
+# On the current single-GPU rig:
+# renderD128  vendor=0x1002  device=0x1638   ← Vega 8 iGPU
+#
+# With the two R9700s installed (June 2026) it looked like this instead:
 # renderD128  vendor=0x1002  device=0x7551   ← Radeon AI PRO R9700
 # renderD129  vendor=0x1002  device=0x7551   ← Radeon AI PRO R9700
 # renderD130  vendor=0x1002  device=0x1638   ← Vega 8 iGPU
@@ -516,11 +525,18 @@ timeout 60 ./llm/rocm-vega/bin/test-backend-ops -o MUL_MAT -b ROCm0
 
 | `ttm.pages_limit` | `16777216` | Raise TTM (Translation Table Maps) page limit to 64GB (16,777,216 pages * 4KB). This is the max amount of RAM the Linux kernel is allowed to give to the graphics subsystem. **Note: Both `amdgpu.gttsize` and `ttm.pages_limit` must be set together to exceed the default 8GB limit.** |
 
-| `amdgpu.cwsr_enable` | `0` | Disable compute wave save/restore (fixes segfaults during inference) |
+| ~~`amdgpu.cwsr_enable`~~ | ~~`0`~~ | **Do not set.** Was believed to fix inference segfaults, but with CWSR disabled the Qwen 35B model fails to load and crashes during loading (see [benchmarks.md](benchmarks.md)). Leave CWSR at the driver default. |
 
-| `amd_iommu` | `on` | Enable/force IOMMU (fixes "page not present" memory faults) |
+| `amd_iommu` | `on` | Optional. Was applied while chasing "page not present" memory faults; **not** part of the verified-working config and not set by `setup/bootstrap-host.sh`. Add only if you actually hit those faults. |
 
 
+
+**The verified-working set is just the first two.** That is exactly what
+`setup/bootstrap-host.sh` writes:
+
+```
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash amdgpu.gttsize=65536 ttm.pages_limit=16777216"
+```
 
 These are set in `/etc/default/grub` → `GRUB_CMDLINE_LINUX_DEFAULT`, then `sudo update-grub` + reboot.
 Ref: [AgentZ — How to Fix ROCm Memory Faults on AMD GPUs](https://medium.com/@agentz/how-to-fix-rocm-pytorch-memory-faults-on-amd-gpus-segmentation-fault-page-not-present-544b9f62f627)

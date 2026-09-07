@@ -32,7 +32,7 @@
 #
 # Hardware: AMD Ryzen 7 5700G - Vega 8 (gfx90c / Renoir)
 # PCI:      auto-detected by device ID 0x1638 (render node moves when
-#           discrete GPUs are added/removed — renderD130 as of June 2026)
+#           discrete GPUs are added/removed — renderD128 as of September 2026)
 # VRAM:     16 GB UMA (BIOS) + ~23 GB GTT (shared system RAM)
 #
 # TIP: Increase VRAM in BIOS (UMA Frame Buffer Size) to 16GB for best results.
@@ -123,7 +123,10 @@ check_prereqs() {
     local ok=true
 
     # Check render group membership
-    if ! id -nG | grep -qw render; then
+    # Capture first — `cmd | grep -q` under pipefail can report failure via
+    # SIGPIPE even when the pattern matched.
+    user_groups=$(id -nG)
+    if [[ " $user_groups " != *" render "* ]]; then
         echo "⚠  WARNING: User '$(whoami)' is not in the 'render' group in this session."
         echo "   Run: sudo usermod -aG render,video $(whoami)"
         echo "   Then log out and back in (or reboot)."

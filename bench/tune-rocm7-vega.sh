@@ -62,7 +62,10 @@ done
 for c in /sys/class/drm/card*/device; do
     [ "$(cat "$c/device" 2>/dev/null)" = "0x1638" ] && VEGA8_CARD="$(basename "$(dirname "$c")")"
 done
-: "${VEGA8_RENDER_NODE:=/dev/dri/renderD130}"
+# Fallback only — the PCI-ID scan above is authoritative. This constant has been
+# renderD129, then renderD130 (2× R9700 installed), and is renderD128 now that the
+# Vega 8 is the only GPU; do not trust it, override with VEGA8_RENDER_NODE.
+: "${VEGA8_RENDER_NODE:=/dev/dri/renderD128}"
 echo "Vega 8 render node: $VEGA8_RENDER_NODE   card: ${VEGA8_CARD:-unknown}"
 PERF_PATH="/sys/class/drm/$VEGA8_CARD/device/power_dpm_force_performance_level"
 

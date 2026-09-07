@@ -7,14 +7,14 @@ Building llama.cpp from source with ROCm/HIP support for the AMD Vega 8 APU (gfx
 LM Studio's bundled ROCm backend only includes kernels for RDNA2+ GPUs (gfx1030 and newer). The Vega 8 iGPU uses the GCN 5 architecture (gfx90c), which isn't supported. Building llama.cpp ourselves lets us target `gfx900` — the closest official ROCm target to gfx90c.
 
 > **Status (June 2026):**
-> - **Host HIP 5.7.1 is broken** — Ubuntu 25.10 ships HIP 5.7.1/Clang-21, a ~2 major version mismatch; GPU inference segfaults. Do not use `run/run-llamaserver-rocm.sh` for GPU offload.
+> - **Ubuntu's own HIP packages** — on Ubuntu 25.10 the distro shipped HIP 5.7.1/Clang-21, a ~2 major version mismatch that segfaulted during GPU inference (`run/run-llamaserver-rocm.sh`, kept only for reference). Ubuntu 26.04 ships `libamdhip64-dev` 7.1 instead, which has not been tested here — this project installs AMD's own ROCm 7.2 packages and uses those.
 > - **ROCm 6.2.4 Docker** (`./run/run-docker-rocm.sh`) — stable, full GPU offload confirmed.
 > - **ROCm 7.2 Docker** (`./run/run-docker-rocm7.sh`) — re-verified 2026-06-13; 35B full offload stable, gfx900 tensile backport applied. **Recommended ROCm path.**
-> - **ROCm 7.2 Baremetal** — worked 2026-05-14 (built with `GGML_HIP_GRAPHS=OFF`, `GGML_BACKEND_DL=ON`, `GGML_CPU_ALL_VARIANTS=ON`), but **broken on the current host** since the classic ROCm 7.2 install was replaced by modular `amdrocm-core` 7.13+/gfx120x packages (May 2026) — see README "ROCm on Vega 8". Still valid on hosts with classic ROCm 7.0–7.2: install via `setup/install-rocm7-host.sh`, build via `build/build-llamacpp-rocm7-baremetal.sh`, run via `run/run-rocm7-baremetal.sh`. Two Ubuntu 25.10 workarounds needed (see [Baremetal Prerequisites](#baremetal-prerequisites-ubuntu-2510) below).
+> - **ROCm 7.2 Baremetal** — **working again, re-verified 2026-09-07** on Ubuntu 26.04 / kernel 7.0 with classic ROCm 7.2.0 (built with `GGML_HIP_GRAPHS=OFF`, `GGML_BACKEND_DL=ON`, `GGML_CPU_ALL_VARIANTS=ON`). It was broken May–September 2026 only because the modular `amdrocm-core` 7.13+/gfx120x packages had replaced classic ROCm for the R9700s; with the dGPUs gone and classic ROCm reinstalled, the path works. Install via `setup/bootstrap-host.sh` (or `setup/install-rocm7-host.sh` alone), build via `build/build-llamacpp-rocm7-baremetal.sh`, run via `run/run-rocm7-baremetal.sh`.
 >
 > For native GPU inference without ROCm, **use Vulkan** (the `run/start-llama-server.sh` default) — see [ARCHITECTURE.md](ARCHITECTURE.md#vulkan-vs-rocm-on-this-system).
 >
-> **Multi-GPU note:** With the two Radeon AI PRO R9700s also present, both Docker scripts auto-detect the Vega 8 render node by PCI ID (`0x1638` — currently `/dev/dri/renderD130`) and pass only that device into the container. In baremetal mode, `run/run-rocm7-baremetal.sh` auto-detects the Vega 8 agent index (currently GPU 2, after the two gfx1201 R9700s).
+> **Device note:** The Vega 8 is currently the only GPU — `/dev/dri/renderD128`, ROCm agent index **0**. Both Docker scripts still auto-detect the render node by PCI ID (`0x1638`) and pass only that device into the container, and `run/run-rocm7-baremetal.sh` still auto-detects the agent index, so nothing needs changing if a dGPU is added back (with the two R9700s installed these were `renderD130` and index 2).
 
 ## Prerequisites
 
@@ -31,7 +31,7 @@ sudo apt install -y libhipblas-dev
 sudo apt install -y cmake git build-essential python3
 ```
 
-On Ubuntu 25.10, `hipcc` pulls in `clang-21`, `llvm-21`, `libamdhip64-dev`, and `rocm-device-libs-21`.
+On Ubuntu 25.10 the distro's `hipcc` pulled in `clang-21`, `llvm-21`, `libamdhip64-dev`, and `rocm-device-libs-21`. On this host the AMD repo is pinned at priority 600, so `hipcc` resolves to AMD's `1.1.1.70200-43~24.04` instead.
 
 ### CMake Symlinks (Ubuntu Multiarch Fix)
 
@@ -145,26 +145,32 @@ Key differences from ROCm 6 Docker:
 
 ### Baremetal (requires classic ROCm 7.0–7.2 on the host)
 
-> ⚠ Broken on the current host: the modular `amdrocm-core` 7.13+/gfx120x packages
-> (installed May 2026 for the R9700s) reject `HSA_OVERRIDE_GFX_VERSION` and ship no
-> gfx9 rocBLAS kernels. The build and run scripts detect this and abort with
-> instructions to use Docker. The steps below apply to hosts with classic ROCm 7.2.
+> ✅ Working on the current host (re-verified 2026-09-07). This path needs **classic**
+> ROCm 7.0–7.2. AMD's modular `amdrocm-core` 7.13+/gfx120x packages — installed here
+> May–September 2026 for the R9700s — reject `HSA_OVERRIDE_GFX_VERSION` and ship no
+> gfx9 rocBLAS kernels; the build and run scripts detect that and abort with a pointer
+> to Docker.
 
-#### Baremetal Prerequisites (Ubuntu 25.10)
+#### Baremetal Prerequisites (Ubuntu 25.10 / 26.04)
 
-Ubuntu 25.10 isn't officially supported by AMD. Two workarounds are needed:
+Neither release is officially supported by AMD, so the installer pins to the
+noble (24.04) packages. On 26.04 those still resolve because `libelf1t64` provides
+`libelf1` and `libncurses-dev` provides `libtinfo-dev`.
 
-**1. Use AMD's noble (24.04) packages — ABI-compatible with 25.10:**
 ```bash
+sudo bash setup/bootstrap-host.sh     # full host prep, calls the installer below
+# or just the ROCm part:
 sudo bash setup/install-rocm7-host.sh
 ```
-This adds the ROCm 7.2 apt repo pinned to `noble`, installs ~29 packages including `hip-dev` and `hsa-rocr-dev`.
 
-**2. libxml2 soname compatibility symlink** (Ubuntu 25.10 renamed `.so.2` → `.so.16`):
-```bash
-sudo ln -sf /lib/x86_64-linux-gnu/libxml2.so.16 /lib/x86_64-linux-gnu/libxml2.so.2
-```
-ROCm LLVM's linker (`lld`) was built against `libxml2.so.2`. Without this symlink, CMake's HIP compiler test fails.
+This adds the ROCm 7.2 apt repo pinned to `noble` and installs ~29 packages including
+`hip-dev` and `hsa-rocr-dev`.
+
+**libxml2 soname shim — now automatic.** ROCm LLVM's linker (`lld`) was built against
+`libxml2.so.2`, but Ubuntu 25.10+ ships only `libxml2.so.16` (soname bumped in libxml2
+2.15), and without a shim CMake's HIP compiler test fails. `install-rocm7-host.sh`
+creates the symlink itself, inside `/opt/rocm/lib` (and `/opt/rocm/llvm/lib`) rather
+than `/lib/x86_64-linux-gnu`, so no system package is affected.
 
 #### Build and Run
 
