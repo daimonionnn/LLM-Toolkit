@@ -6,12 +6,19 @@ RUN apt-get update -qq && \
       hipblas-dev rocblas-dev rocsolver-dev numactl && \
     rm -rf /var/lib/apt/lists/*
 
-# TODO: pin to a tested commit (ARG LLAMA_CPP_REF) — cloning master makes image
-#       builds non-reproducible; the sed-based FP8 patch below is also fragile
-#       against upstream changes to vendors/hip.h and should fail the build
-#       loudly if it no longer matches.
+# Pinned to the same commit as the baremetal and Vulkan builds; the default is
+# passed in by run/run-docker-rocm*.sh from build/llama.cpp-ref, so all four
+# build paths compile identical sources. Override with --build-arg LLAMA_CPP_REF=...
+# TODO (still open): the sed-based FP8 patch below is fragile against upstream
+#       changes to vendors/hip.h and should fail the build loudly if it no
+#       longer matches.
 WORKDIR /app
-RUN git clone https://github.com/ggml-org/llama.cpp.git .
+ARG LLAMA_CPP_REF=465e49b9cea78a68b9c244ffb48d0ee24a82873d
+RUN git init -q . && \
+    git remote add origin https://github.com/ggml-org/llama.cpp.git && \
+    git fetch --depth 1 origin "$LLAMA_CPP_REF" && \
+    git checkout --detach FETCH_HEAD && \
+    git rev-parse --short HEAD
 
 # Patch: gfx900 (Vega) does not support FP8. vendors/hip.h unconditionally
 # typedef-aliases CUDA FP8 types to HIP FP8 types, which don't exist on gfx900.

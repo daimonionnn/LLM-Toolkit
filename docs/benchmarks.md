@@ -2,6 +2,62 @@
 
 Compact benchmark log for llama.cpp on AMD Ryzen 7 5700G / Radeon Vega 8. Latest run is first; older results are kept where they explain behaviour changes.
 
+## ROCm 7.2 Docker re-verified — 2026-09-08
+
+Image rebuilt from `build/Dockerfile.rocm7-vega` and benchmarked on both models with
+the same harness as the baremetal rows. **The 20 GB model loaded without the
+2026-06-13 hard freeze** (GTT used 23284 MiB), settling the last open question about
+this path.
+
+| Model | FA | Prefill | Decode |
+| ----- | -- | ------- | ------ |
+| gemma-4-E4B | OFF | 69.98 / 109.49 / 106.04 | 16.06 / 14.62 / 11.97 |
+| gemma-4-E4B | ON | 67.55 / 53.83 / 29.41 | 16.86 / 15.56 / 13.07 |
+| Qwen3.5-35B | OFF | 46.62 / 94.25 / 88.17 | 19.84 / 18.83 / 15.30 |
+| Qwen3.5-35B | ON | 46.33 / 67.82 / 41.39 | 19.92 / 18.56 / 15.29 |
+
+### Docker vs baremetal
+
+| Model | Metric | Baremetal | Docker | |
+| ----- | ------ | --------- | ------ | -- |
+| gemma | prefill `-fa 0` | 69.99 / 109.10 / 106.13 | 69.98 / 109.49 / 106.04 | identical |
+| gemma | decode `-fa 0` | 15.93 / 14.48 / 11.89 | 16.06 / 14.62 / 11.97 | +1 % |
+| 35B | prefill `-fa 0` | 47.73 / 94.48 / 88.96 | 46.62 / 94.25 / 88.17 | identical |
+| 35B | decode `-fa 0` | 18.70 / 17.79 / 14.66 | **19.84 / 18.83 / 15.30** | **+4-6 %** |
+
+Prefill matches to within measurement noise on both models. The 35B decode difference
+looked real (+4-6 %) and was chased down; **it is a measurement artefact of the server
+harness, not a backend difference.** Four hypotheses, each tested:
+
+| Hypothesis | Test | Result |
+| ---------- | ---- | ------ |
+| The image's three extra env vars (`GPU_SINGLE_ALLOC_PERCENT`, `GPU_MAX_HEAP_SIZE`, `GPU_FORCE_64BIT_PTR`) | baremetal harness run with them exported | 18.76 / 17.99 / 14.72 vs 18.70 / 17.79 / 14.66 — **no effect** |
+| Different llama.cpp commit (Docker 67672dc vs baremetal 465e49b) | rebuilt baremetal at 67672dc, same harness | 18.93 / 18.00 / 14.72 — **+0.2, does not close a 1.1 gap** |
+| Container's `--ulimit memlock=-1` vs the host's 8 MB | same binary, `llama-bench` with and without unlimited memlock | 20.39 / 19.27 / 15.91 vs 20.30 / 19.27 / 15.90 — **no effect** |
+| A real backend difference | `llama-bench -n 64 -d 128,1024,4096` on baremetal at Docker's commit | **20.30 / 19.27 / 15.90 — higher than the Docker harness figure of 19.84 / 18.83 / 15.30** |
+
+The last row settles it: measured directly at matched KV depths, baremetal is *faster*
+than the number the harness reports for Docker. Whatever produces the apparent Docker
+advantage lives in the llama-server measurement path (HTTP, slot handling, sampling,
+the `--no-warmup` cold start), not in the HIP backend. Docker and baremetal compile the
+same sources against the same ROCm and perform the same.
+
+Two lasting consequences:
+
+- **All four build paths are now pinned** to one commit via `build/llama.cpp-ref`, read
+  by the baremetal script, the Vulkan script and both Dockerfiles (`--build-arg
+  LLAMA_CPP_REF`, passed by `run/run-docker-*.sh`). They had each been cloning `master`
+  independently, which is how a 465e49b baremetal and a 67672dc image came to be
+  compared in the first place.
+- **`llama-bench -d` is the trustworthy instrument for decode**, and the server harness
+  should not be used to compare deployments at the few-percent level. See
+  [ROCM-PERF-AUDIT.md](ROCM-PERF-AUDIT.md) §2.
+
+FA ON collapses prefill on Docker exactly as it does on baremetal (35B 4K: 41.4 vs
+88.2), so that is a property of the gfx900 kernel, not of the packaging.
+
+---
+
 ## Qwen3.5-35B-A3B-Q4_K_M — 2026-09-07
 
 First 35B run since the reinstall, at the 16 GB carve-out / 64 GB GTT configuration.
@@ -122,46 +178,83 @@ Recorded after fan speed was raised — an identical earlier sweep throttled and
 | Vulkan GPU | OFF | 95.60 / 149.48 / 155.30 | 17.19 / 16.39 / 14.29 | — |
 | ROCm 7.2 baremetal | OFF | 56.46 / 89.10 / 87.16 | 14.28 / 12.91 / 10.63 | reproduces at 1K/4K (May: 70.91 / 84.88 / 84.95) |
 | ROCm 7.2 baremetal | ON | 55.23 / 47.36 / 27.11 | 14.32 / 13.31 / 11.44 | FA ON collapses prefill — as documented |
-| CPU (`-dev none`) | ON | 95.38 / 94.66 / 88.37 | 15.05 / 14.24 / 12.05 | decode reproduces; **prefill does not** (May: 249.57 / 754.82 / 840.50) |
+| CPU (`-dev none`) | ON | 95.38 / 94.66 / 88.37 | 15.05 / 14.24 / 12.05 | first genuine CPU-only measurement; the May prefill row was `-ngl 0` and is not comparable |
 | CPU (`-dev none`) | OFF | 94.88 / 93.23 / 84.69 | 14.95 / 14.39 / 13.44 | — |
 
 **Vulkan and ROCm both reproduce**, which is the main result: the restored stack performs
 as it did before the reinstall. Use `-fa 1` for Vulkan and `-fa 0` for ROCm.
 
-### The CPU rows were measuring the GPU
+### `-fa auto` resolves to ON on ROCm, and that costs 57 % of prefill
 
-`start_cpu()` used `-ngl 0`, which no longer keeps the model off the GPU — upstream
-changed the `-ngl` default to `auto`. Measured directly on this build:
+`-fa` defaults to `auto`, which is resolved by probing the backend for
+`FLASH_ATTN_EXT` support. On gfx900 `ggml_cuda_get_best_fattn_kernel` falls through
+to the generic tile kernel (`fattn.cu:652-666`), so the probe succeeds and FA is
+enabled — the worst setting on this GPU. Measured 2026-09-08, gemma-4-E4B, 3330-token
+prompt, `llama-bench -ngl 99`:
+
+| `-fa` | Prefill t/s |
+| ----- | ----------- |
+| `0` | **112.78** |
+| `1` | 48.91 |
+| `auto` | 48.90 |
+
+`run/run-rocm7-baremetal.sh` passed no `-fa` at all, so every launch through it ran
+with flash attention on. Fixed: the launcher now defaults to `-fa 0` (still
+overridable by passing your own `-fa` after the model). The benchmark harness was
+never affected — it always passed an explicit `-fa`.
+
+### Closed: the pre-September CPU prefill figures were not CPU measurements
+
+**Cause identified.** `-ngl 0` does not force CPU-only execution on current
+llama.cpp — upstream changed the `-ngl` default to `auto`, and with a GPU backend
+present the model is still offloaded. Measured directly:
 
 | Flag | GPU busy | GTT used |
 | ---- | -------- | -------- |
 | `-ngl 0` | 91 % | 6567 MB |
 | `-dev none` | idle | 157 MB |
 
-So every `-ngl 0` "CPU" row on current llama.cpp is a GPU run with a CPU label — which is
-why the first attempt landed near the Vulkan figure instead of anywhere near the
-historical CPU numbers. Fixed to `-dev none`; the CPU rows above are genuine (GTT 157 MB,
-iGPU idle while the CPU is under full load).
+Every CPU row in this file dated before 2026-09-07 was produced with `-ngl 0`, so
+none of them is a CPU measurement. `start_cpu()` in the harness now uses `-dev none`.
 
-### Unresolved: CPU prefill is ~10× below the May figure
+**Current figures, confirmed two independent ways** (gemma-4-E4B, prefill t/s at the
+harness prompt sizes):
 
-With real CPU-only execution and no throttling, prefill measures **85–96 t/s**, stable
-across 8 and 16 threads, cold and warm start, harness and direct `llama-bench`, and
-unchanged by both the cooling fix and the BIOS retune. May recorded 840 t/s at 4096.
-Decode reproduces fine, so this is specific to prefill.
+| Method | ~141 | ~937 | ~3330 |
+| ------ | ---- | ---- | ----- |
+| `llama-bench -dev none -t 8 -r 2` | 99.31 ± 0.07 | 98.06 ± 0.27 | 93.07 ± 0.65 |
+| harness (llama-server, `-dev none`) | 96.26 | 96.59 | 90.13 |
+| *May 2026 (`-ngl 0`)* | *249.57* | *754.82* | *840.50* |
 
-Not explained. Two observations, neither conclusive:
+The two current methods share no code path beyond the model file — no server, no
+HTTP, no prompt cache in the first — and agree within 3 %. The result is stable
+across 8 and 16 threads, cold and warm start, and both models.
 
-- The May shape (249 → 755 → 840, rising 3.4× with context) is not how prefill behaves;
-  throughput normally flattens or falls as context grows, which is what the current
-  numbers do (96 → 97 → 90).
-- The model is **7.52 B** parameters total. Sustaining 840 tok/s prefill implies roughly
-  12 TFLOP/s; a 5700G's 8 Zen 3 cores on AVX2 are an order of magnitude below that. The
-  measured ~90 t/s corresponds to ~1.3 TFLOP/s, which is the right order for this chip.
+**Why the May figure cannot be a real CPU measurement.** gemma-4-E4B is 7.52 B
+parameters (≈ 4 B "effective"). Prefill costs about `2 × N × T` operations, so
+840 tok/s needs 6.7 TOP/s at 4 B active, or 12.6 TOP/s at 7.52 B. A 5700G's eight
+Zen 3 cores issue at most two 256-bit `vpmaddubsw` per cycle per core = 128 int8
+ops/cycle, i.e. **≈ 4.1 TOP/s peak at 4 GHz**. The claimed number is 1.6–3× *above*
+the theoretical ceiling of the whole CPU, while the measured 93 t/s sits at 34 % of
+it — a normal efficiency for real quantized GEMM.
 
-That points at the May figure being an artefact rather than a regression, but the binary
-and config that produced it were wiped by the reinstall, so it cannot be checked. Treat
-the historical CPU prefill rows as suspect until someone reproduces them.
+> An earlier revision of this file said the gap was "an order of magnitude" beyond
+> the chip's ability. That was an overstatement: it is 1.6–3× above peak. The
+> conclusion is unchanged — above 100 % of peak is impossible — but the factor was
+> wrong and is corrected here.
+
+A second, independent sanity check: at 840 t/s the CPU would be outrunning the iGPU
+(ROCm 106, Vulkan 172 on the same model) by 5× on a compute-bound task, using the
+same memory bus.
+
+**35B-A3B**: the May CPU row (58 / 197 / 211) is not provably impossible on
+arithmetic alone, but it was produced the same way and did not reproduce either
+(measured 88 / 94 / 87 with `-dev none`). It is treated as superseded for the same
+reason.
+
+**Both models' pre-September CPU prefill rows are therefore erroneous, not a
+regression.** They are left in the historical tables, struck through, so the record
+of what was believed stays intact.
 
 ### Thermals — before and after raising fan speed
 
@@ -362,7 +455,7 @@ Model size is ~20 GB. Full GPU offload requires the large GTT/UMA path.
 | CPU                    | OFF   |    59.33 |    186.34 |    208.17 | Prefill down vs 2026-05-14 CPU; decode improved at 1K            |
 | CPU                    | ON    |    58.18 |    196.63 |    210.79 | Still best prefill overall; smaller gap than before              |
 | ROCm 7.2 baremetal     | OFF ✅ |    42.47 |     72.61 |     71.65 | Faster than previous baremetal FA-OFF at all contexts            |
-| ROCm 7.2 baremetal     | ON ⚠  |    40.48 |     55.79 |     37.55 | FA still hurts large-context prefill                             |
+| ROCm 7.2 baremetal     | ON    |    40.48 |     55.79 |     37.55 | FA hurts large-context prefill (confirmed; see FA note)          |
 | Vulkan GPU             | OFF   |    64.73 |    138.08 |    136.44 | Huge prefill jump vs older Vulkan baseline                       |
 | Vulkan GPU             | ON ✅  |    65.00 |    138.57 |    137.11 | Best GPU prefill, FA neutral/slightly positive                   |
 
@@ -387,10 +480,10 @@ Smaller model; all GPU backends fully offload.
 
 | Backend                | FA    | ~128 tok | ~1024 tok | ~4096 tok | vs previous comparable run                                      |
 | ---------------------- | ----- | -------: | --------: | --------: | ---------------------------------------------------------------- |
-| CPU                    | OFF ⚠️  |   235.17 |    693.91 |    772.09 | ⚠️ Suspect — see below                                            |
-| CPU                    | ON ⚠️  |   249.57 |    754.82 |    840.50 | ⚠️ **Did not reproduce 2026-09-07** (measured 95 / 95 / 88 with verified CPU-only execution, no throttling). Both CPU prefill rows here are suspect; decode reproduced fine |
+| CPU                    | OFF   | ~~235.17~~ |  ~~693.91~~ |  ~~772.09~~ | **Not a CPU measurement** — `-ngl 0` offloaded to the GPU. Decode figures stand |
+| CPU                    | ON    | ~~249.57~~ |  ~~754.82~~ |  ~~840.50~~ | **Not a CPU measurement** (above the CPU's arithmetic ceiling). Real CPU-only: 99 / 98 / 93. See "Closed: the pre-September CPU prefill figures" |
 | ROCm 7.2 baremetal     | OFF ✅ |    70.91 |     84.88 |     84.95 | Close to previous; still recommended ROCm mode                   |
-| ROCm 7.2 baremetal     | ON ⚠  |    65.77 |     47.70 |     27.67 | FA still severely hurts ROCm prefill                             |
+| ROCm 7.2 baremetal     | ON    |    65.77 |     47.70 |     27.67 | FA severely hurts ROCm prefill (confirmed; see FA note)          |
 | Vulkan GPU             | OFF   |    91.11 |    143.58 |    147.37 | Strong GPU path                                                  |
 | Vulkan GPU             | ON ✅  |   121.97 |    166.81 |    160.02 | Best GPU prefill; FA helps Vulkan                                |
 
@@ -445,7 +538,7 @@ These tables preserve important previous runs without repeating every per-backen
 | ---------- | -------------------------------------- | -------------------- | --- | ----------------------------- | ---------------------------- | ------------------------------------- |
 | 2026-05-15 | BIOS 2GB;32GB GTT,current ROCm tweaks  | Vulkan GPU           | ON  | 121.97 / 166.81 / 160.02      | 16.97 / 16.56 / 15.84        | Latest best GPU path                  |
 | 2026-05-15 | BIOS 2GB;32GB GTT,current ROCm tweaks  | ROCm 7.2 baremetal   | OFF | 70.91 / 84.88 / 84.95         | 14.50 / 13.15 / 10.89        | Latest recommended ROCm               |
-| 2026-05-15 | BIOS 2GB;32GB GTT,current ROCm tweaks  | CPU                  | ON  | 249.57 / 754.82 / 840.50 ⚠️     | 15.06 / 14.24 / 12.17        | ⚠️ **Prefill suspect** — did not reproduce 2026-09-07 (measured 95 / 95 / 88 with verified CPU-only execution and no thermal throttling); decode did reproduce. See the 2026-09-07 section |
+| 2026-05-15 | BIOS 2GB;32GB GTT,current ROCm tweaks  | CPU                  | ON  | ~~249.57 / 754.82 / 840.50~~     | 15.06 / 14.24 / 12.17        | **Prefill is not a CPU measurement** (`-ngl 0` offloaded; figure also exceeds the CPU's arithmetic ceiling). Real CPU-only 2026-09-08: 99 / 98 / 93. Decode reproduced |
 | 2026-05-14 | 16 GB BIOS carveout, no 64 GB GTT      | Vulkan GPU           | ON  | 115.76 / 158.83 / 156.18      | 14.73 / 14.55 / 14.03        | Earlier best GPU; latest is faster decode |
 | 2026-05-14 | 16 GB BIOS carveout, no 64 GB GTT      | ROCm 7.2 baremetal   | OFF | 67.96 / 81.96 / 81.77         | 13.32 / 12.19 / 10.00        | Prior baremetal baseline              |
 | 2026-05-14 | 16 GB BIOS carveout, no 64 GB GTT      | CPU                  | ON  | 257.48 / 810.80 / 923.35      | 12.33 / 11.90 / 10.10        | Highest recorded Gemma prefill        |

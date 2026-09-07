@@ -1,0 +1,11 @@
+# The llama.cpp commit every build path in this repo uses.
+#
+# Why this file exists: the baremetal script, the Vulkan script and both
+# Dockerfiles used to clone `master` independently. On 2026-09-08 that produced
+# a baremetal install at 465e49b and a Docker image at 67672dc, which made the
+# two paths non-comparable — a 4-6% decode difference on the 35B could not be
+# attributed to packaging, environment, or upstream changes.
+#
+# Change this deliberately, then rebuild every path and re-run the benchmarks.
+# Format: one bare commit SHA, comments and blank lines ignored.
+465e49b9cea78a68b9c244ffb48d0ee24a82873d

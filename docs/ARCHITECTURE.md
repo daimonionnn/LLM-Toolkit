@@ -81,7 +81,7 @@ The ISA (instruction set architecture) is identical between gfx900 and gfx90c. C
 
 Two hardware facts bound what any amount of build/flag tuning can achieve on this iGPU:
 
-1. **No hardware `dp4a`.** The byte-wise integer dot-product instruction that llama.cpp's quantized matmul (MMQ) kernels depend on first appears on **Vega 20 / gfx906** (`ggml/src/ggml-cuda/common.cuh` — "VEGA20 … minimum for dp4a"). gfx900/gfx90c lacks it, so MMQ runs through a **software-emulated** dp4a (≈3 instructions per op). Consequently the default prefill path leans on rocBLAS/Tensile (dequantize → FP GEMM) using the gfx900 kernels backported from ROCm 6.3.4 — those kernels are AMD's last gfx900 Tensile tuning and are effectively fixed.
+1. **No hardware `dp4a`.** The byte-wise integer dot-product instruction that llama.cpp's quantized matmul (MMQ) kernels depend on first appears on **Vega 20 / gfx906** (`ggml/src/ggml-cuda/common.cuh` — "VEGA20 … minimum for dp4a"). gfx900/gfx90c lacks it, so MMQ runs through a **software-emulated** dp4a: `common.cuh:717-730` emits 4× `v_mul_i32_i24` (SDWA byte selects) + 2× `v_add3_u32`, i.e. **6 VALU instructions per 4 MACs** (an earlier revision of this file said "≈3 instructions per op" — that was wrong). llama.cpp reacts to this with an explicit rule at `mmq.cu:378-383`: on Vega, MMQ is used **only for MoE experts**, while dense matmuls go to rocBLAS/Tensile (dequantize → FP16 GEMM) using the gfx900 kernels backported from ROCm 6.3.4. This is the dominant reason ROCm trails Vulkan on prefill: RADV's shaders do the same work with packed FP16 FMA at 2 MACs per instruction.
 2. **Shared DDR4 bandwidth (~40–50 GB/s).** Decode reads the active weights once per token, so token rate is bandwidth-bound, not compute-bound. For the 35B-A3B MoE (~3B active params at Q4 ≈ 1.5–1.7 GB/token) the theoretical ceiling is ~25–30 t/s; measured ROCm decode is 12–15 t/s and Vulkan/RADV reaches 19–20 t/s on the *same* silicon — so ROCm's decode kernels, not the memory wall, are the limiter, and **Vulkan remains the better decode backend**.
 
 What this means for tuning the ROCm 7 build:
@@ -91,7 +91,7 @@ What this means for tuning the ROCm 7 build:
 | `-ub` / `-b` ubatch/batch size | runtime | Main prefill knob — 8 CUs may prefer a different ubatch than the default 512 |
 | `-ctk q8_0` (K-cache quant) | runtime | Cuts KV read bandwidth; helps decode most at large context. `-ctv` needs flash attention, which loses on Vega (use `-fa 0`), so K-only |
 | `rocm-smi --setperflevel high` | runtime | Pins GPU clocks; trades shared CPU/APU power budget — can help or hurt |
-| `GGML_CUDA_FORCE_MMQ=ON` | build | Ambiguous: emulated dp4a likely *loses* on prefill, but MMQ never materializes dequantized weights so it may *win* on decode bandwidth — must be measured |
+| `GGML_CUDA_FORCE_MMQ=ON` | build | **Cannot affect decode.** Decode (batch ≤ 8) is served by MMVQ, chosen before `ggml_cuda_should_use_mmq` is consulted; the flag only moves *dense prefill* GEMMs onto emulated dp4a. Measured a wash on the 35B in June 2026 — expected, since its experts were already on MMQ |
 | `GGML_CUDA_F16` | build | **Gone** — no longer a CMake option; FP16 paths are auto-selected by arch (gfx900 has fast packed FP16) |
 | `GGML_HIP_ROCWMMA_FATTN`, `GGML_HIP_MMQ_MFMA` | build | **N/A** — require CDNA MFMA units; GCN5 has none |
 | HIP graphs | build | Kept OFF for stability; low cost on a single small device |
@@ -129,8 +129,31 @@ APUs like the Ryzen 5700G use **Unified Memory Architecture** — the GPU shares
 - Dynamically managed by the kernel.
 - Default is often 8GB or 16GB, but can be raised to **64 GB** with `amdgpu.gttsize=65536 ttm.pages_limit=16777216` (only needed for models > 16GB).
 - Backed by system RAM with GPU-accessible page table mappings.
-- **Performance consideration:** Expanding this to 64GB induces translation overhead. Benchmarks show a ~15-20% drop in generation speed (t/s) when running the 64GB GTT over falling back to the 16GB limit, likely due to page fault/translation efficiency on the memory controller.
+- **Performance consideration (hypothesis, not established).** One 2026-05 table showed ~12-13 % lower decode at 64 GB GTT than at the 16 GB default, and this file previously reported that as a settled "15-20 % translation overhead". Adjacent history rows contradict it, and today's 64 GB-GTT numbers exceed the older 16 GB ones, so the *measurement* is not reliable. There is, however, a real mechanism that would produce such an effect and has never been tested: setting `amdgpu.gttsize` above the BIOS carve-out makes the kernel set `apu_prefer_gtt` (see below), which pushes every ROCm allocation into snooped GTT pages instead of the carve-out. See [ROCM-PERF-AUDIT.md](ROCM-PERF-AUDIT.md) item 6.
 - Appears as "GTT" in `rocm-smi`; llama.cpp reports the Vega 8 as `gfx900:xnack-` with 65536 MiB visible (if tuned) or 16384 MiB visible (by default).
+
+### Why ROCm ignores the BIOS carve-out (kernel rule, traced 2026-09-08)
+
+Measured per backend phase: with a 16 GB carve-out, Vulkan puts 16354 MiB of the 35B
+in VRAM and spills 5013 MiB to GTT, while ROCm keeps **311 MiB** in VRAM and maps
+20787 MiB through GTT. The same pattern holds on gemma. This is not a llama.cpp
+decision — it is `amdgpu`:
+
+1. `amdgpu_ttm_init()` sets `adev->apu_prefer_gtt = true` when
+   `AMD_IS_APU && real_vram_size < gtt_size`. Here that is 16 GiB < 64 GiB
+   (`amdgpu.gttsize=65536`), so the flag is on.
+2. `amdgpu_amdkfd_gpuvm_alloc_memory_of_gpu()` then rewrites every allocation
+   requested as VRAM — which is every `hipMalloc` — to `AMDGPU_GEM_DOMAIN_GTT`.
+
+Confirmed on this box: `/sys/class/kfd/kfd/topology/nodes/1` reports
+`local_mem_size 0` and a single FB_PUBLIC bank of exactly 68719476736 B =
+`ttm.pages_limit << 12`, which is the `apu_prefer_gtt` branch of
+`amdgpu_amdkfd_get_local_mem_info()`.
+
+**Consequence:** raising the BIOS carve-out helps Vulkan in proportion to how much
+of the model fits (measured +12-15 % on the 20 GB Qwen), and does nothing for ROCm.
+Lowering `amdgpu.gttsize` below the carve-out would flip the flag off — untested,
+and it would cap ROCm at the carve-out size, so the 35B would no longer load.
 
 ### Implications for LLM Inference
 
@@ -181,19 +204,19 @@ The known-bad paths remain useful for historical context:
 
 | Aspect | ROCm 7.2 Baremetal | Vulkan (RADV) | ROCm 7.2 Docker | ROCm 6.2.4 Docker | Host HIP 5.7.1 | ROCm 6.4.4 Docker |
 |--------|----------------------|---------------|-----------------|-------------------|----------------|-------------------|
-| Status | Broken on current host¹ | **Default** | ⚠️ small models only² | Working legacy | Broken | Broken |
+| Status | ✅ Working¹ | **✅ Default** | ✅ Working² | ROCm 6 comparison | Broken | Broken |
 | Driver/runtime | classic ROCm 7.2 host install | Mesa RADV | ROCm 7.2 + HIP | ROCm 6.2.4 + HIP | Ubuntu HIP 5.7.1 | ROCm 6.4.4 + HIP |
 | gfx90c support | gfx900 override + tensile backport | Native RADV | gfx900 override + tensile backport | gfx900 override + FP8 stub | gfx900 override | Native gfx90c |
 | Setup complexity | `setup/` + `build/` once, then `run/start-llama-server.sh` | Native Vulkan build | `./run/run-docker-rocm7.sh` | `./run/run-docker-rocm.sh` | Build + patches | Docker, but crashes |
 | Stability | **✅ Stable** | **✅ Stable** | **✅ Stable** | **✅ Stable** | Segfaults | Kernel crashes |
-| Vega 8 perf (35B) | **39–69 / 11–15 t/s** (FA OFF) | **45–50 / 19–20 t/s** | **39–70 / 12–15 t/s** (FA OFF) | **40–64 / 12–14 t/s** (FA OFF) | N/A | N/A |
+| Vega 8 perf (35B) | **48–94 / 15–19 t/s** (FA OFF) | **73–159 / 21–22 t/s** (FA ON) | **47–94 / 15–20 t/s** (FA OFF) | 40–64 / 12–14 t/s (May 2026) | N/A | N/A |
 | Best use | ROCm server on classic ROCm 7.2 hosts | Best decode/interactive (default) | Recommended ROCm path | ROCm 6 comparison | Historical only | Historical only |
 | Crash risk | None observed | None observed | None observed | None observed | Segfaults / hangs | MODE2 reset |
-| Multi-GPU isolation | HSA agent auto-detect (`ROCR_VISIBLE_DEVICES=2` here) | `-dev Vulkan0` (auto-detected) | PCI ID render-node isolation | PCI ID render-node isolation | N/A | N/A |
+| Multi-GPU isolation | HSA agent auto-detect (`ROCR_VISIBLE_DEVICES=0` — the Vega is the only GPU now) | `-dev Vulkan0` (auto-detected) | PCI ID render-node isolation | PCI ID render-node isolation | N/A | N/A |
 
-¹ Worked until May 2026, when the host's classic ROCm 7.2 was replaced by modular `amdrocm-core` 7.13/7.14 (gfx120x) packages for the R9700s — that ROCr rejects `HSA_OVERRIDE_GFX_VERSION` and ships no gfx9 rocBLAS kernels. Still valid for hosts running classic ROCm 7.0–7.2. See README "ROCm on Vega 8".
+¹ Was broken May–September 2026, when the host's classic ROCm 7.2 had been replaced by modular `amdrocm-core` 7.13/7.14 (gfx120x) packages for the R9700s — that ROCr rejects `HSA_OVERRIDE_GFX_VERSION` and ships no gfx9 rocBLAS kernels. With the dGPUs gone and classic ROCm 7.2.0 reinstalled it works again; re-verified 2026-09-07. The scripts still preflight-check for modular ROCm and abort with instructions if it reappears.
 
-² Loads and runs small models (7B verified 2026-06-13), but loading **Qwen3.5-35B-A3B-Q4_K_M hard-froze the entire machine within ~3 s** (2026-06-13, instant lockup, no kernel log, forced power-cycle). The pre-May-2026 "35B full offload stable" result no longer holds after the host changes. Use Vulkan for large models until root-caused. The earlier "✅ Stable / no crash observed" entries in this table refer to the pre-change host and are kept for history only.
+² **Root-caused and resolved.** The 2026-06-13 hard freeze (instant lockup loading Qwen3.5-35B-A3B-Q4_K_M, no kernel log, forced power-cycle) was *not* a Docker or model problem: a fresh Ubuntu install had left GRUB without `amdgpu.gttsize=65536 ttm.pages_limit=16777216`, so the Vega 8 had only ~30 GB of GTT and the 20 GB allocation overflowed it. With the parameters present the 35B loads and runs — re-verified on baremetal ROCm 2026-09-07 (47.7 / 94.5 / 89.0 prefill, 18.7 / 17.8 / 14.7 decode) and it is `setup/bootstrap-host.sh`'s job to keep them there. The standing rule is therefore about GRUB, not about model size: check `grep gttsize /proc/cmdline` before loading anything large on ROCm.
 
 ### Docker ROCm test results
 

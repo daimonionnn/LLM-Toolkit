@@ -23,7 +23,10 @@
 set -euo pipefail
 
 LLAMA_CPP_REPO="https://github.com/ggml-org/llama.cpp.git"
-LLAMA_CPP_BRANCH="master"
+# Shared pin — see build/llama.cpp-ref. Keeping the Vulkan and ROCm builds on the
+# same commit is what makes the backend comparison in docs/benchmarks.md valid.
+# shellcheck source=build/llama-cpp-ref.sh
+. "$(dirname "$0")/llama-cpp-ref.sh"
 BUILD_DIR="$(realpath -m "$(dirname "$0")/../llm/build")"
 INSTALL_DIR="$(realpath -m "$(dirname "$0")/../llm/vulkan")"
 JOBS=$(nproc)
@@ -74,11 +77,19 @@ fetch_source() {
     if [ -d "$BUILD_DIR/llama.cpp/.git" ]; then
         echo "  Reusing existing checkout (shared with the ROCm build)"
         cd "$BUILD_DIR/llama.cpp"
+        if [ "$(git rev-parse HEAD)" != "$LLAMA_CPP_REF" ]; then
+            echo "  Checkout is at $(git rev-parse --short HEAD), pin is ${LLAMA_CPP_REF:0:7} — fetching"
+            git fetch --depth 1 origin "$LLAMA_CPP_REF"
+            git checkout --detach FETCH_HEAD
+        fi
     else
         mkdir -p "$BUILD_DIR"
         cd "$BUILD_DIR"
-        git clone --depth 1 -b "$LLAMA_CPP_BRANCH" "$LLAMA_CPP_REPO" llama.cpp
-        cd llama.cpp
+        mkdir -p llama.cpp && cd llama.cpp
+        git init -q
+        git remote add origin "$LLAMA_CPP_REPO"
+        git fetch --depth 1 origin "$LLAMA_CPP_REF"
+        git checkout --detach FETCH_HEAD
     fi
     echo "  Commit: $(git log --oneline -1)"
     echo ""

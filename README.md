@@ -20,18 +20,25 @@ Toolkit for ROCm and Vulkan LLM inference on Vega APUs/GPUs (tested on AMD Ryzen
 
 ## Performance
 
-### Vega 8 iGPU — Qwen3.5-35B-A3B Q4_K_M (`-ngl 99 -c 8192`, May 2026)
+### Vega 8 iGPU — Qwen3.5-35B-A3B Q4_K_M (`-ngl 99 -c 8192`, September 2026)
 
-| Backend                        | Prefill (t/s) | Generation (t/s) | Notes                                                                      |
-| ------------------------------ | ------------- | ---------------- | -------------------------------------------------------------------------- |
-| CPU FA ON (`-ngl 0 -fa 1`) ⚠️   | 57–233 ⚠️      | 13–16            | ⚠️ **Suspect.** Two problems: `-ngl 0` does not force CPU-only on current llama.cpp (use `-dev none`), and the claimed ~4× prefill gain at large context did not reproduce in 2026-09 testing. Prefill figure unverified; generation reproduced |
-| CPU FA OFF (`-ngl 0 -fa 0`) ⚠️  | 56–226 ⚠️      | 12–14            | ⚠️ Same caveat as the row above                                            |
-| Vulkan native (FA OFF default) | 45–50         | 19–20            | **Best generation throughput** — stable across all context sizes           |
-| ROCm 6.2.4 — **FA OFF**        | 40–64         | 12–14            | `-fa 0` recommended — FA ON hurts prefill ~33–83% on Vega 8                |
-| ROCm 6.2.4 — FA ON             | 35–49         | 11–13            | Default in old config; suboptimal, use `-fa 0`                             |
-| ROCm 7.2 — **FA OFF**          | 39–84*        | 12–15            | **Best GPU prefill at large context.** `-fa 0` recommended; *84 t/s @4K with `-ub 2048` (June 2026 tuning) |
-| ROCm 7.2 — FA ON               | 36–53         | 12–15            | Available for comparison; weaker prefill than FA OFF at ≥ 1K tokens        |
-| LM Studio (Vulkan)             | 49–158*       | 18–19            | *Prefill inflated by LM Studio batching — not directly comparable          |
+Prefill / decode t/s at ~128 / ~1024 / ~4096 tokens. Measured 2026-09-07 on
+Ubuntu 26.04, 16 GB UMA carve-out, after the cooling fix.
+
+| Backend | Prefill | Decode | Notes |
+| ------- | ------- | ------ | ----- |
+| **Vulkan `-fa 1`** | **73 / 159 / 154** | **22 / 22 / 21** | **Best overall.** The default (`run/start-llama-server.sh`). Decode barely drops with context |
+| Vulkan `-fa 0` | 67 / 158 / 156 | 21 / 21 / 19 | Prefill equal, decode falls off at 4K — use `-fa 1` |
+| ROCm 7.2 `-fa 0` | 48 / 94 / 89 | 19 / 18 / 15 | Best ROCm setting. ~40 % behind Vulkan on prefill, ~30 % on decode at 4K |
+| ROCm 7.2 `-fa 1` | 44 / 68 / 42 | 19 / 18 / 15 | **Do not use.** FA halves prefill on gfx900 |
+| CPU `-dev none -fa 1` | 88 / 94 / 87 | 18 / 18 / 14 | Genuinely CPU-only (see note below) |
+| CPU `-dev none -fa 0` | 86 / 91 / 87 | 18 / 18 / 17 | Best CPU decode at 4K |
+
+> **`-ngl 0` no longer means CPU-only.** Upstream changed the `-ngl` default to
+> `auto`; with a GPU backend present, `-ngl 0` still offloads (measured: 91 % GPU
+> busy, 6.5 GB in GTT). Use `-dev none`. Every CPU row published here before
+> 2026-09-07 was measured with `-ngl 0` and is therefore not a CPU measurement —
+> see [docs/benchmarks.md](docs/benchmarks.md) for the correction.
 
 > Full benchmark data in [docs/benchmarks.md](docs/benchmarks.md).
 
@@ -109,13 +116,21 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 | Path                                | Status | Notes                                                                |
 | ----------------------------------- | ------ | -------------------------------------------------------------------- |
 | **Baremetal ROCm 7.2** (`run/run-rocm7-baremetal.sh`) | ✅ working — re-verified 2026-09-07 | Works again now that the modular `amdrocm-core` packages are gone with the dGPUs. Binary reports `gfx900:xnack-`, 65536 MiB. gemma-4-E4B `-fa 0`: **70.0 / 109.1 / 106.1 prefill, 15.9 / 14.5 / 11.9 decode** at the 16 GB carve-out — 29 % ahead of May 2026 at 1K |
-| **Docker ROCm 7.2** (`run/run-docker-rocm7.sh`) | ⚠️ unverified since the 26.04 reinstall | Worked 2026-06-13 (35B-A3B, 20.4 prefill / 15.9 decode t/s). Docker is installed again but the image has not been rebuilt. **Requires the GTT GRUB params** (below) |
-| **Docker ROCm 6.2.4** (`run/run-docker-rocm.sh`) | ⚠️ unverified since the 26.04 reinstall | Self-contained `rocm/dev-ubuntu-24.04:6.2.4` image; last known working before the May 2026 host changes |
+| **Docker ROCm 7.2** (`run/run-docker-rocm7.sh`) | ✅ working — re-verified 2026-09-08 | Image rebuilt and benchmarked on both models. Prefill matches baremetal to within noise (35B 4K: 88.2 vs 89.0; gemma 4K: 106.0 vs 106.1). **The 35B loaded without the 2026-06-13 freeze** — that was missing GRUB params, not Docker. **Still requires the GTT GRUB params** (below) |
+| **Docker ROCm 6.2.4** (`run/run-docker-rocm.sh`) | ROCm 6 comparison path | Self-contained `rocm/dev-ubuntu-24.04:6.2.4` image; last measured May 2026 (40–64 prefill / 12–14 decode on the 35B). Kept for ROCm-6-vs-7 comparison rather than for use |
 | Baremetal HIP 5.7.1 (Ubuntu repo)   | ❌ broken | HIP 5.7.1 + Clang-21 mismatch — segfaults at slot init               |
+
+> **The ROCm numbers here are measured at `-ub 512`, but the launchers ship `-ub 2048`.**
+> `bench/run-all-benchmarks.sh` passes no `-b`/`-ub`, so it benchmarks llama.cpp's
+> default micro-batch, while `run/run-rocm7-baremetal.sh` and `run/run-docker-rocm7.sh`
+> both set `-b 2048 -ub 2048` — worth about +22 % prefill at 4K on this GPU (measured
+> June 2026). The published ROCm prefill figures are therefore conservative relative to
+> what the launchers actually run. Re-measuring the tables at `-ub 2048` is open work;
+> see [ROCM-PERF-AUDIT.md](docs/ROCM-PERF-AUDIT.md) item 1.
 
 **Why baremetal broke in June 2026, and why it works again:** the gfx900-on-gfx90c technique needs (a) `HSA_OVERRIDE_GFX_VERSION=9.0.0` and (b) gfx900 rocBLAS tensile kernels. AMD's modular packages (`amdrocm-core` 7.13/7.14), installed for the R9700s, **rejected** the override (`HSA_STATUS_ERROR_OUT_OF_RESOURCES`) and shipped no gfx9 kernels at all — and since llama.cpp's prefill GEMMs go through rocBLAS, even a native gfx90c rebuild could not have worked there. With the dGPUs moved out and classic ROCm 7.2.0 installed from repo.radeon.com, both preconditions hold again: the runtime accepts the override and the ROCm 6.3.4 tensile backport applies cleanly. `run/run-rocm7-baremetal.sh` still preflight-checks all of this and fails early with instructions if a modular-ROCm host reappears.
 
-> ⚠️ **Large models on ROCm REQUIRE the 64 GB GTT GRUB params.** On 2026-06-13, loading **Qwen3.5-35B-A3B-Q4_K_M** (20 GB) via ROCm Docker **hard-froze the entire PC within ~3 seconds** — because a fresh Ubuntu reinstall had left GRUB without `amdgpu.gttsize=65536 ttm.pages_limit=16777216`, so the Vega 8 had only ~30 GB GTT and the allocation overflowed it. **With those params restored (64 GB GTT), the 35B loads to ~21 GB and runs fine** (re-verified 2026-06-13: 20.4 prefill / 15.9 decode t/s). Confirm with `cat /proc/cmdline | grep gttsize` and that the Vega 8 reports `65536M of GTT memory ready`. Without the params, do **not** load >~10 GB models on ROCm — use Vulkan (`./run/start-llama-server.sh`, the default) for large models instead. See [Model Capacity](#model-capacity) for the GRUB setup.
+> ⚠️ **Large models on ROCm REQUIRE the GTT GRUB params.** On 2026-06-13, loading **Qwen3.5-35B-A3B-Q4_K_M** (20 GB) via ROCm **hard-froze the entire PC within ~3 seconds** — a fresh Ubuntu install had left GRUB without `amdgpu.gttsize=65536 ttm.pages_limit=16777216`, so the Vega 8 had only ~30 GB of GTT and the allocation overflowed it. With the params present the 35B loads to ~21 GB and runs on both paths — re-verified 2026-09-07 (baremetal) and 2026-09-08 (Docker), no freeze either time. `setup/bootstrap-host.sh` sets them; confirm with `grep -o 'amdgpu.gttsize=[0-9]*' /proc/cmdline`. **This warning stays because the failure mode is a hard lockup, not an error message** — if the params are missing, do not load >~10 GB models on ROCm; use Vulkan instead. See [Model Capacity](#model-capacity).
 
 **Baremetal ROCm 7.2 worked before the host ROCm swap** (confirmed 2026-05-14) and still applies to hosts with classic ROCm 7.0–7.2 packages: install via `setup/install-rocm7-host.sh`, build via `build/build-llamacpp-rocm7-baremetal.sh`, run via `run/run-rocm7-baremetal.sh`. Two Ubuntu 25.10 workarounds required: use AMD's noble/24.04 packages (ABI-compatible), and create `sudo ln -sf /lib/x86_64-linux-gnu/libxml2.so.16 /lib/x86_64-linux-gnu/libxml2.so.2` for ROCm LLVM. The install script now refuses to run if modular `amdrocm-core` packages are present (they'd conflict over `/opt/rocm` and could break the R9700 setup).
 
@@ -235,6 +250,7 @@ bash run/run-rocm7-baremetal.sh /path/to/model.gguf -ngl 99 -c 8192
 | [docs/benchmarks.md](docs/benchmarks.md)           | Full benchmark results — ROCm Docker, Vulkan native, LM Studio, CPU |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common errors, Docker ROCm workaround, diagnostic commands          |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)       | GPU architecture, Vulkan vs ROCm analysis, UMA memory model         |
+| [docs/ROCM-PERF-AUDIT.md](docs/ROCM-PERF-AUDIT.md) | Why ROCm trails Vulkan on this silicon, ranked fixes, experiment plan |
 | [docs/BUILD.md](docs/BUILD.md)                     | Build prerequisites, ROCm build from source, HIP patches            |
 | [docs/HIP57-PATCHES.md](docs/HIP57-PATCHES.md)     | Technical details of HIP 5.7 compatibility patches                  |
 
@@ -315,9 +331,10 @@ amd-vega-rocm-vulkan-llm-toolkit/
 - [x] **Script fixes (2026-09-07):** `install-rocm7-host.sh` added *root* rather than the invoking user to `render`/`video` under `sudo` (`$USER` vs `$SUDO_USER`), and `dpkg -l | grep -q` aborted it via SIGPIPE under `pipefail` before anything installed; libxml2 soname shim is now automatic and scoped to `/opt/rocm/lib`. `build-llamacpp-rocm7-baremetal.sh` had `CMAKE_INSTALL_RPATH=$ORIGIN`, but upstream moved `libllama-*-impl.so` to `lib/`, so installed binaries would not start — now `$ORIGIN;$ORIGIN/../lib`
 - [x] **Re-verify gemma-4-E4B on 26.04 (2026-09-07)** — Vulkan and ROCm both reproduce the May 2026 numbers; Vulkan `-fa 1` remains the best path. Added `build/build-llamacpp-vulkan.sh` (the harness needed `llm/vulkan/` for both its Vulkan *and* CPU rows, and no script in the repo built it)
 - [x] **Harness bugs found while re-verifying (2026-09-07)** — (a) `_detect_vega8_rocm_index` printed an *empty* string when the Vega is GPU 0, because awk's `print gpu` on an unassigned variable emits nothing; that set `ROCR_VISIBLE_DEVICES=""` and silently ran ROCm benchmarks on the CPU. Masked until the dGPUs left. (b) `start_cpu` used `-ngl 0`, which no longer keeps the model off the GPU now that upstream defaults `-ngl` to `auto` — the "CPU" rows were GPU runs. Now `-dev none`
-- [ ] **Investigate the CPU prefill gap** — real CPU-only prefill measures 83–89 t/s vs 840 t/s recorded in May; decode reproduces. The May shape (rising 3.4× with context) and a rough FLOP ceiling for 8 Zen 3 cores both suggest the historical figure is an artefact, but the binary that produced it is gone
+- [x] **CPU prefill gap resolved (2026-09-08)** — the pre-September CPU rows were measured with `-ngl 0`, which no longer forces CPU-only execution (91 % GPU busy, 6.5 GB in GTT), so they are GPU runs mislabelled as CPU. Real CPU-only prefill is 99 / 98 / 93 t/s on gemma, confirmed by `llama-bench -dev none` and the server harness independently (within 3 %). The May figure of 840 t/s is 1.6–3× above the arithmetic ceiling of eight Zen 3 cores and cannot be a real measurement. Harness fixed to `-dev none`; historical rows struck through
 - [x] **Cooling fixed enough to stop throttling (2026-09-07)** — raising the fan curve took the peak from 105.4 °C to 89.5 °C, the average from 90.5 °C to 79.7 °C, and samples over Tjmax from 27 to **0**; iGPU SCLK now holds 2400 → 2351 MHz instead of dropping to 2208. Worth ~6–8 % prefill on every backend, so all published numbers were re-measured after the fix
 - [x] **BIOS retune (2026-09-07)** — UMA carve-out 2 → 16 GB, Curve Optimizer −10 → −15, IOMMU off, iGPU boost +200 MHz, throttle limit 90 → 99 °C. Net on gemma: ROCm +22 % prefill / +12 % decode, Vulkan +5 % decode, CPU ~unchanged; peak temp fell to 86.6 °C. The iGPU boost changed the DPM table but not the observed 2400 MHz clock, and IOMMU off changed nothing measurable
+- [x] **`-fa auto` trap fixed in the ROCm launcher (2026-09-08)** — `run/run-rocm7-baremetal.sh` passed no `-fa`, so it resolved to `auto`, which probes the backend, finds the generic FA tile kernel compiles for gfx900, and enables flash attention. Measured on gemma at a 3330-token prompt: `-fa 0` = 112.8 t/s, `-fa 1` = 48.9, **`-fa auto` = 48.9**. Anyone using the launcher without passing `-fa 0` was silently getting 43 % of achievable prefill. Launcher now defaults to `-fa 0` (still overridable)
 - [x] **Qwen3.5-35B re-benchmarked (2026-09-07)** — 20 GB model loads on ROCm without the documented hard freeze. Vulkan `-fa 1` is the best path (21 t/s decode to 4K, 159 t/s prefill at 1K); both GPU backends beat May 2026 by 12–24 %
 - [ ] **Explain ROCm's gain from the BIOS retune** — per-phase sampling shows **ROCm never uses the BIOS carve-out** (VRAM ~300 MB, whole model in GTT) on both gemma and the 35B, so the carve-out cannot be the cause. An earlier commit claimed it was, from a whole-run VRAM peak that actually belonged to the Vulkan phase; corrected in [benchmarks.md](docs/benchmarks.md). The real cause is unidentified — four other settings changed at once
 - [ ] **Repaste the CPU** — peak is 86.6 °C on a 65 W APU. Not throttling, but the throttle limit is now set to 99 °C, above the 95 °C stock Tjmax, so the usual safety margin is gone

@@ -36,11 +36,11 @@
 set -euo pipefail
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-# TODO: pin LLAMA_CPP_BRANCH to a tested tag/commit instead of tracking master
-#       (non-reproducible builds; upstream CMake flag renames have already
-#       bitten this repo — GGML_HIP_UMA, AMDGPU_TARGETS → GPU_TARGETS).
 LLAMA_CPP_REPO="https://github.com/ggml-org/llama.cpp.git"
-LLAMA_CPP_BRANCH="master"
+# Pinned commit, shared with the Vulkan script and both Dockerfiles so every
+# build path in this repo compiles identical sources. See build/llama.cpp-ref.
+# shellcheck source=build/llama-cpp-ref.sh
+. "$(dirname "$0")/llama-cpp-ref.sh"
 BUILD_DIR="$(realpath -m "$(dirname "$0")/../llm/build")"
 INSTALL_DIR="$(realpath -m "$(dirname "$0")/../llm/rocm7-vega")"
 AMDGPU_TARGET="gfx900"
@@ -244,13 +244,25 @@ if [ -d "$BUILD_DIR/llama.cpp" ]; then
     cd "$BUILD_DIR/llama.cpp"
     git checkout -- .
     git fetch origin
-    git checkout "$LLAMA_CPP_BRANCH"
-    git pull origin "$LLAMA_CPP_BRANCH"
+    if [ "$(git rev-parse HEAD)" != "$LLAMA_CPP_REF" ]; then
+        echo "  Checkout is at $(git rev-parse --short HEAD), pin is ${LLAMA_CPP_REF:0:7} — fetching"
+        git fetch --depth 1 origin "$LLAMA_CPP_REF"
+        git checkout --detach FETCH_HEAD
+    else
+        echo "  Already at the pinned commit ${LLAMA_CPP_REF:0:7}"
+    fi
 else
     echo "  Cloning llama.cpp..."
     mkdir -p "$BUILD_DIR"
     cd "$BUILD_DIR"
-    git clone --depth 1 -b "$LLAMA_CPP_BRANCH" "$LLAMA_CPP_REPO" llama.cpp
+    # Fetch the pinned commit directly — `clone --depth 1` can only take a
+    # branch tip, and the pin is generally not the tip.
+    mkdir -p llama.cpp && cd llama.cpp
+    git init -q
+    git remote add origin "$LLAMA_CPP_REPO"
+    git fetch --depth 1 origin "$LLAMA_CPP_REF"
+    git checkout --detach FETCH_HEAD
+    cd ..
     cd llama.cpp
 fi
 echo ""

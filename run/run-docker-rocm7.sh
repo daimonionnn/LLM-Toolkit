@@ -63,7 +63,12 @@ fi
 # ── Auto-build image if missing ───────────────────────────────────────────────
 if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
     echo "Docker image '$IMAGE_NAME' not found. Building (this will take ~20-40 min)..."
-    docker build -t "$IMAGE_NAME" -f "$(dirname "$0")/../build/Dockerfile.rocm7-vega" "$(dirname "$0")/.." 
+    # Pass the shared pin so the image compiles the same llama.cpp commit as the
+    # baremetal and Vulkan builds — see build/llama.cpp-ref.
+    . "$(dirname "$0")/../build/llama-cpp-ref.sh"
+    docker build -t "$IMAGE_NAME" \
+        --build-arg "LLAMA_CPP_REF=$LLAMA_CPP_REF" \
+        -f "$(dirname "$0")/../build/Dockerfile.rocm7-vega" "$(dirname "$0")/.."
 fi
 
 # ── Stop any existing container using this image or port 8080 ─────────────────

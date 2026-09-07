@@ -164,8 +164,22 @@ exec "$LLAMA_BIN" \
     -m "$MODEL" \
     --host 0.0.0.0 \
     --port 8080 \
+    -fa 0 \
     -b 2048 -ub 2048 \
     "$@"
+# All three flags are defaults, not constraints: "$@" comes last, so anything
+# you pass on the command line overrides them.
+#
+# -fa 0 (flash attention OFF): REQUIRED for usable prefill on this GPU. Leaving
+# it unset means -fa auto, which probes the backend, finds that the generic
+# FA tile kernel compiles for gfx900, and enables FA — on this hardware that
+# more than halves prefill. Measured 2026-09-08, gemma-4-E4B, 3330-token
+# prompt: -fa 0 = 112.8 t/s, -fa 1 = 48.9 t/s. The collapse is a gfx900 kernel
+# problem (no v_dot2_f32_f16, so the tile kernel's KQ loop falls back to ~5
+# VALU ops per 2 MACs) — see docs/ROCM-PERF-AUDIT.md.
+# Verified the same run: -fa auto = 48.9 t/s, i.e. identical to -fa 1, so
+# leaving -fa unset silently costs 57% of prefill.
+#
 # -ub 2048 (full-batch prefill): ~+22% prefill at 4K ctx on the Vega 8 vs the
 # default -ub 512, no decode cost (docs/benchmarks.md, measured on the Docker
-# path). Overridable — pass your own -b/-ub after the model.
+# path).

@@ -77,11 +77,19 @@ RUN set -eux; \
     echo "=== gfx900 tensile backport complete ==="
 
 # ── Clone llama.cpp ───────────────────────────────────────────────────────────
-# TODO: pin to a tested commit (ARG LLAMA_CPP_REF) — cloning master makes image
+# Pinned to the same commit as the baremetal and Vulkan builds; the default is
+# passed in by run/run-docker-rocm*.sh from build/llama.cpp-ref, so all four
+# build paths compile identical sources. Override with --build-arg LLAMA_CPP_REF=...
+# (superseded TODO: cloning master made image
 #       builds non-reproducible, and upstream flag renames have already broken
 #       builds here once (GGML_HIP_UMA / AMDGPU_TARGETS removal).
 WORKDIR /app
-RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git .
+ARG LLAMA_CPP_REF=465e49b9cea78a68b9c244ffb48d0ee24a82873d
+RUN git init -q . && \
+    git remote add origin https://github.com/ggml-org/llama.cpp.git && \
+    git fetch --depth 1 origin "$LLAMA_CPP_REF" && \
+    git checkout --detach FETCH_HEAD && \
+    git rev-parse --short HEAD
 
 # ── Build with HIP targeting gfx900 ──────────────────────────────────────────
 #
