@@ -2,6 +2,44 @@
 
 Compact benchmark log for llama.cpp on AMD Ryzen 7 5700G / Radeon Vega 8. Latest run is first; older results are kept where they explain behaviour changes.
 
+## Qwen3.5-35B-A3B-Q4_K_M — 2026-09-07
+
+First 35B run since the reinstall, at the 16 GB carve-out / 64 GB GTT configuration.
+Same harness and model as the May 2026 35B rows. The 20 GB model loaded on ROCm without
+the hard freeze documented for 2026-06-13 — GTT headroom is adequate (42 GB free after
+the carve-out).
+
+### Prefill / decode t/s at ~128 / ~1024 / ~4096 (`-c 8192`)
+
+| Backend | FA | Prefill | Decode | vs. May 2026 |
+| ------- | -- | ------- | ------ | ------------ |
+| **Vulkan GPU** | ON | **73.35 / 159.06 / 153.67** | **21.73 / 21.56 / 20.95** | +13 % prefill, +13 % decode (May: 65.00 / 138.57 / 137.11, 19.06 / 18.95 / 18.47) |
+| Vulkan GPU | OFF | 66.89 / 157.57 / 155.91 | 21.30 / 21.21 / 18.60 | — |
+| **ROCm 7.2 baremetal** | OFF | **47.73 / 94.48 / 88.96** | **18.70 / 17.79 / 14.66** | +24 % prefill, +12 % decode (May: 42.47 / 72.61 / 71.65, 16.67 / 15.85 / 13.03) |
+| ROCm 7.2 baremetal | ON | 43.60 / 67.60 / 41.53 | 18.74 / 17.55 / 14.65 | FA ON hurts prefill, as on every other model |
+| CPU (`-dev none`) | ON | 88.31 / 94.33 / 87.46 | 18.39 / 17.95 / 14.36 | decode +8 %; prefill not comparable (May used `-ngl 0`, which offloads) |
+| CPU (`-dev none`) | OFF | 86.07 / 91.48 / 86.54 | 18.25 / 18.14 / 17.05 | — |
+
+**Vulkan FA ON is the clear best**: 21 t/s decode holding to 4K context, and ~159 t/s
+prefill at 1K. Both GPU backends beat May across the board.
+
+### Memory residency — where the model actually sits
+
+| Phase | VRAM (16 GB carve-out) | GTT |
+| ----- | ---------------------- | --- |
+| Vulkan | **16354 MB** | 5013 MB |
+| ROCm | **311 MB** | 20787 MB |
+| CPU | 304 MB | 67 MB |
+
+Vulkan fills the carve-out and spills the remainder to GTT. **ROCm ignores the carve-out
+entirely** and maps the whole model through GTT — the same pattern the gemma run shows,
+and the reason the carve-out helps Vulkan but not ROCm.
+
+Thermals: peak 81.8 °C, average 74.6 °C over 502 s — the coolest sweep recorded on this
+rig, and comfortably clear of any throttling.
+
+---
+
 ## BIOS retune — 2026-09-07 (current configuration)
 
 Five BIOS changes made together: UMA framebuffer 2 GB → **16 GB**, IOMMU disabled,
@@ -29,13 +67,29 @@ aggregate effect is attributable.
 | Vulkan FA ON | 171.29 → 172.05 (+0.4 %) | 16.36 → **17.15** (+4.8 %) |
 | CPU FA ON | 88.37 → 90.13 (+2 %) | 12.05 → 12.26 (+1 %) |
 
-**The 16 GB carve-out is what moved ROCm.** VRAM peak went from 1754 MB to 3645 MB while
-GTT peak fell from 4764 MB to 3664 MB — the model now lives largely in the BIOS
-carve-out instead of GTT, and avoids the translation overhead this repo has measured at
-15–20 % (see [ARCHITECTURE.md](ARCHITECTURE.md#gtt-graphics-translation-table)). ROCm
-prefill at 1K now beats the May 2026 figure (84.88) by 29 %.
+Attribution below was revised after the 35B run — read the correction before relying on it.
 
-Vulkan gained little prefill but ~5 % decode; it was already less GTT-bound.
+**Correction (2026-09-07, after the 35B run):** an earlier version of this section
+claimed the carve-out was what moved ROCm, citing the run's VRAM peak rising from
+1754 MB to 3645 MB. That was wrong — the figure was a whole-run peak taken during the
+*Vulkan* phase and attributed to ROCm without checking the per-phase split.
+
+Sampling VRAM and GTT per backend shows **ROCm does not use the BIOS carve-out at all**:
+
+| Model | Phase | VRAM (carve-out) | GTT |
+| ----- | ----- | ---------------- | --- |
+| gemma-4-E4B | Vulkan | 3638 MB | 2872 MB |
+| gemma-4-E4B | **ROCm** | **281 MB** | **3660 MB** |
+| Qwen3.5-35B | Vulkan | 16354 MB | 5013 MB |
+| Qwen3.5-35B | **ROCm** | **311 MB** | **20787 MB** |
+
+ROCm puts the whole model in GTT regardless of how much carve-out is available. The
+carve-out benefits **Vulkan**, and roughly in proportion to how much of the model it can
+hold — which is why Vulkan gained only ~5 % decode on the 5 GB gemma (already mostly
+resident at 2 GB) but 12–15 % on the 20 GB Qwen (16 GB moved out of GTT).
+
+**So what caused ROCm's +22 % here is not established.** It is not the carve-out. The
+retune changed four other things at once, and this run cannot separate them.
 
 **The +200 MHz iGPU boost did nothing measurable.** `pp_dpm_sclk` reports a 2200 MHz top
 state instead of 2000, but the clock actually observed under load is still 2400 MHz —
