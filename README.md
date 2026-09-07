@@ -6,8 +6,8 @@ Toolkit for ROCm and Vulkan LLM inference on Vega APUs/GPUs (tested on AMD Ryzen
 
 | Component   | Detail                                                                    |
 | ----------- | ------------------------------------------------------------------------- |
-| CPU/APU     | AMD Ryzen 7 5700G (8C/16T, Zen 3) — slightly undervolted: Curve Optimizer all-core offset −10 |
-| iGPU        | Radeon Vega 8 — gfx90c (GCN 5, 8 CUs, 2 GB BIOS carve-out + up to 64 GB UMA/GTT) — **the only GPU in the box as of September 2026** |
+| CPU/APU     | AMD Ryzen 7 5700G (8C/16T, Zen 3) — undervolted: Curve Optimizer all-core offset **−15**; IOMMU disabled; CPU throttle limit raised to 99 °C (stock Tjmax is 95 °C) |
+| iGPU        | Radeon Vega 8 — gfx90c (GCN 5, 8 CUs, **16 GB BIOS carve-out** + up to 64 GB UMA/GTT) — **the only GPU in the box as of September 2026** |
 | dGPU        | none — both R9700s now live in a different machine (September 2026); `lspci` shows the Cezanne iGPU only. Benchmark rows dated May/June 2026 were recorded while they were still installed here |
 | RAM         | 64 GB DDR4 — 2× 32 GB Kingston Fury 3600 MT/s, overclocked to 4200 MT/s (shared with the Vega 8 iGPU via UMA) |
 | Motherboard | ASRock Fatal1ty B450 Gaming-ITX/ac                                        |
@@ -108,7 +108,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 
 | Path                                | Status | Notes                                                                |
 | ----------------------------------- | ------ | -------------------------------------------------------------------- |
-| **Baremetal ROCm 7.2** (`run/run-rocm7-baremetal.sh`) | ✅ working — re-verified 2026-09-07 | Works again now that the modular `amdrocm-core` packages are gone with the dGPUs. Binary reports `gfx900:xnack-`, 65536 MiB. gemma-4-E4B `-fa 0`: **56.5 / 89.1 / 87.2 prefill, 14.3 / 12.9 / 10.6 decode** — reproduces the May 2026 numbers at 1K/4K |
+| **Baremetal ROCm 7.2** (`run/run-rocm7-baremetal.sh`) | ✅ working — re-verified 2026-09-07 | Works again now that the modular `amdrocm-core` packages are gone with the dGPUs. Binary reports `gfx900:xnack-`, 65536 MiB. gemma-4-E4B `-fa 0`: **70.0 / 109.1 / 106.1 prefill, 15.9 / 14.5 / 11.9 decode** at the 16 GB carve-out — 29 % ahead of May 2026 at 1K |
 | **Docker ROCm 7.2** (`run/run-docker-rocm7.sh`) | ⚠️ unverified since the 26.04 reinstall | Worked 2026-06-13 (35B-A3B, 20.4 prefill / 15.9 decode t/s). Docker is installed again but the image has not been rebuilt. **Requires the GTT GRUB params** (below) |
 | **Docker ROCm 6.2.4** (`run/run-docker-rocm.sh`) | ⚠️ unverified since the 26.04 reinstall | Self-contained `rocm/dev-ubuntu-24.04:6.2.4` image; last known working before the May 2026 host changes |
 | Baremetal HIP 5.7.1 (Ubuntu repo)   | ❌ broken | HIP 5.7.1 + Clang-21 mismatch — segfaults at slot init               |
@@ -317,7 +317,8 @@ amd-vega-rocm-vulkan-llm-toolkit/
 - [x] **Harness bugs found while re-verifying (2026-09-07)** — (a) `_detect_vega8_rocm_index` printed an *empty* string when the Vega is GPU 0, because awk's `print gpu` on an unassigned variable emits nothing; that set `ROCR_VISIBLE_DEVICES=""` and silently ran ROCm benchmarks on the CPU. Masked until the dGPUs left. (b) `start_cpu` used `-ngl 0`, which no longer keeps the model off the GPU now that upstream defaults `-ngl` to `auto` — the "CPU" rows were GPU runs. Now `-dev none`
 - [ ] **Investigate the CPU prefill gap** — real CPU-only prefill measures 83–89 t/s vs 840 t/s recorded in May; decode reproduces. The May shape (rising 3.4× with context) and a rough FLOP ceiling for 8 Zen 3 cores both suggest the historical figure is an artefact, but the binary that produced it is gone
 - [x] **Cooling fixed enough to stop throttling (2026-09-07)** — raising the fan curve took the peak from 105.4 °C to 89.5 °C, the average from 90.5 °C to 79.7 °C, and samples over Tjmax from 27 to **0**; iGPU SCLK now holds 2400 → 2351 MHz instead of dropping to 2208. Worth ~6–8 % prefill on every backend, so all published numbers were re-measured after the fix
-- [ ] **Repaste the CPU** — peak is still 89.5 °C on a 65 W APU, only ~5 °C of headroom to Tjmax. Not throttling any more, but long sweeps stay close to the edge
+- [x] **BIOS retune (2026-09-07)** — UMA carve-out 2 → 16 GB, Curve Optimizer −10 → −15, IOMMU off, iGPU boost +200 MHz, throttle limit 90 → 99 °C. Net: **ROCm +22 % prefill / +12 % decode**, Vulkan +5 % decode, CPU ~unchanged; peak temp fell to 86.6 °C. The carve-out is what mattered — the iGPU boost changed the DPM table but not the observed 2400 MHz clock, and IOMMU off changed nothing measurable
+- [ ] **Repaste the CPU** — peak is 86.6 °C on a 65 W APU. Not throttling, but the throttle limit is now set to 99 °C, above the 95 °C stock Tjmax, so the usual safety margin is gone
 - [ ] **Re-run the remaining backends on 26.04** — Docker ROCm 6.2.4/7.2 images have not been rebuilt or re-verified since the reinstall, and the 35B-A3B model is not downloaded
 - [ ] **ROCm 7.2 / Vega 8 tuning sweep (in progress, June 2026):** baseline 35B → `-ub`/`-b` batch sizes → `-ctk q8_0` K-cache quant → `rocm-smi --setperflevel high` → maybe `-DGGML_CUDA_FORCE_MMQ=ON`. Harness: `bench/tune-rocm7-vega.sh`. Ceiling analysis (no hardware dp4a, DDR4 bandwidth-bound) in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/benchmarks.md](docs/benchmarks.md)
 - [ ] Document `numactl --membind=0 llama-server` usage for NUMA-sensitive workloads

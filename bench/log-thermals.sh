@@ -78,7 +78,10 @@ for h in /sys/class/hwmon/hwmon*; do
 done
 [ -z "$CPU_TEMP_FILE" ] && echo "⚠  k10temp Tctl not found — CPU temp will be empty" >&2
 
-TJMAX=95
+# 95 °C is the 5700G's stock Tjmax. Some boards expose a user-settable throttle
+# limit (ASRock B450: CPU Temperature Throttle), so allow overriding it —
+# otherwise every run on a raised limit reports a false throttling warning.
+TJMAX="${TJMAX:-95}"
 
 # ─── Output path ─────────────────────────────────────────────────────────────
 if [ -z "$OUT" ]; then

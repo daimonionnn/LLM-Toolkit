@@ -7,7 +7,7 @@ Technical background on GPU inference for this system.
 | Component | Details |
 |-----------|---|
 | CPU | AMD Ryzen 7 5700G (8C/16T, Zen 3) |
-| iGPU | AMD Radeon Vega 8 (gfx90c, 8 CUs, UMA — 2 GB BIOS carve-out / up to 64 GB GTT after GRUB tuning) — `card0` / `/dev/dri/renderD128`, PCI ID `0x1638` |
+| iGPU | AMD Radeon Vega 8 (gfx90c, 8 CUs, UMA — **16 GB BIOS carve-out** / up to 64 GB GTT after GRUB tuning) — `/dev/dri/renderD128`, PCI ID `0x1638` |
 | dGPU | none — both R9700s moved to another machine (September 2026) |
 | RAM | 64 GB DDR4 (shared with Vega 8 iGPU) |
 | OS | Ubuntu 26.04.1 LTS (Resolute Raccoon), kernel 7.0 |
@@ -15,9 +15,10 @@ Technical background on GPU inference for this system.
 
 (September 2026 configuration. Device numbering here is history-dependent and worth
 distrusting: the Vega 8 has been `renderD129`, then `renderD130` with two R9700s
-installed, and is `renderD128` now that it is alone — and the 26.04 reinstall moved it
-from `card1` to `card0` with no hardware change at all. Every script in this repo
-therefore resolves it by PCI ID `0x1638`, never by node number.)
+installed, and is `renderD128` now that it is alone — while its `card` number has moved
+`card1` → `card0` → `card1` across a reinstall and a BIOS change, with no hardware
+change at all. Every script in this repo therefore resolves it by PCI ID `0x1638`,
+never by node number.)
 
 ### Vulkan devices
 

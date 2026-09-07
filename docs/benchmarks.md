@@ -2,32 +2,77 @@
 
 Compact benchmark log for llama.cpp on AMD Ryzen 7 5700G / Radeon Vega 8. Latest run is first; older results are kept where they explain behaviour changes.
 
-## Re-verification after the 26.04 reinstall — 2026-09-07
+## BIOS retune — 2026-09-07 (current configuration)
 
-Same model and same harness as the 2026-05-15 gemma rows, so these are directly
-comparable. Ubuntu 26.04.1 / kernel 7.0 / classic ROCm 7.2.0, Vega 8 as the only GPU
-(`card0`, ROCm index 0), BIOS carve-out 2 GB, **64 GB GTT** (the May rows were recorded
-at 32 GB GTT). Thermals logged throughout with `bench/log-thermals.sh`.
-
-The numbers below are from the **post-cooling-fix run** — fan speed was raised after an
-identical earlier sweep showed the chip throttling (see Thermals). That earlier sweep
-measured 6–8 % lower prefill across every GPU backend, so treat any figure recorded
-while this rig is throttling as a floor, not a result.
+Five BIOS changes made together: UMA framebuffer 2 GB → **16 GB**, IOMMU disabled,
+iGPU max auto boost +200 MHz, CPU Curve Optimizer −10 → **−15** all-core, CPU throttle
+limit 90 → 99 °C. Same model and harness as every row below, so the comparison against
+the 2 GB-carve-out run is clean — but with five variables moved at once, only the
+aggregate effect is attributable.
 
 ### gemma-4-E4B-it-Q4_K_M (`-c 8192`), prefill / decode t/s at ~128 / ~1024 / ~4096
 
+| Backend | FA | Prefill | Decode |
+| ------- | -- | ------- | ------ |
+| **Vulkan GPU** | ON | **127.11 / 171.57 / 172.05** | **18.39 / 17.99 / 17.15** |
+| Vulkan GPU | OFF | 101.36 / 153.07 / 156.85 | 18.10 / 17.14 / 14.91 |
+| **ROCm 7.2 baremetal** | OFF | **69.99 / 109.10 / 106.13** | **15.93 / 14.48 / 11.89** |
+| ROCm 7.2 baremetal | ON | 65.36 / 53.72 / 29.47 | 16.05 / 14.83 / 12.56 |
+| CPU (`-dev none`) | ON | 96.26 / 96.59 / 90.13 | 15.18 / 14.36 / 12.26 |
+| CPU (`-dev none`) | OFF | 95.68 / 94.96 / 86.26 | 14.96 / 14.46 / 13.46 |
+
+### What the retune changed, versus the 2 GB carve-out
+
+| Backend | Prefill @4K | Decode @4K |
+| ------- | ----------- | ---------- |
+| ROCm FA OFF | 87.16 → **106.13** (+22 %) | 10.63 → **11.89** (+12 %) |
+| Vulkan FA ON | 171.29 → 172.05 (+0.4 %) | 16.36 → **17.15** (+4.8 %) |
+| CPU FA ON | 88.37 → 90.13 (+2 %) | 12.05 → 12.26 (+1 %) |
+
+**The 16 GB carve-out is what moved ROCm.** VRAM peak went from 1754 MB to 3645 MB while
+GTT peak fell from 4764 MB to 3664 MB — the model now lives largely in the BIOS
+carve-out instead of GTT, and avoids the translation overhead this repo has measured at
+15–20 % (see [ARCHITECTURE.md](ARCHITECTURE.md#gtt-graphics-translation-table)). ROCm
+prefill at 1K now beats the May 2026 figure (84.88) by 29 %.
+
+Vulkan gained little prefill but ~5 % decode; it was already less GTT-bound.
+
+**The +200 MHz iGPU boost did nothing measurable.** `pp_dpm_sclk` reports a 2200 MHz top
+state instead of 2000, but the clock actually observed under load is still 2400 MHz —
+the same as before the change. The DPM table and the real boost ceiling are not the same
+thing on this APU.
+
+**IOMMU off broke nothing.** `/dev/kfd` and `rocminfo` still work; ROCm on this APU does
+not depend on it. No measurable speed change either.
+
+**Curve Optimizer −15 outweighed the raised throttle limit**: peak 86.6 °C and average
+77.8 °C, versus 89.5 / 79.7 at −10. The run never approached the new 99 °C limit, so
+that setting did not come into play — but it does remove the safety margin that the
+95 °C stock Tjmax provided, and a repaste is still outstanding.
+
+---
+
+## Re-verification after the 26.04 reinstall — 2026-09-07
+
+The run that established the restored stack works, at the **2 GB** carve-out the rig had
+before the BIOS retune above. Same model and harness as the 2026-05-15 gemma rows, so
+these are what reproduce (or fail to reproduce) the May numbers. Ubuntu 26.04.1 /
+kernel 7.0 / classic ROCm 7.2.0, Vega 8 as the only GPU, 64 GB GTT (May was 32 GB GTT).
+
+Recorded after fan speed was raised — an identical earlier sweep throttled and measured
+6–8 % lower prefill on every backend.
+
 | Backend | FA | Prefill | Decode | vs. 2026-05-15 |
 | ------- | -- | ------- | ------ | -------------- |
-| **Vulkan GPU** | ON | **124.23 / 170.73 / 171.29** | **17.55 / 17.16 / 16.36** | reproduces, slightly ahead (May: 121.97 / 166.81 / 160.02) |
+| Vulkan GPU | ON | 124.23 / 170.73 / 171.29 | 17.55 / 17.16 / 16.36 | reproduces (May: 121.97 / 166.81 / 160.02) |
 | Vulkan GPU | OFF | 95.60 / 149.48 / 155.30 | 17.19 / 16.39 / 14.29 | — |
-| **ROCm 7.2 baremetal** | OFF | **56.46 / 89.10 / 87.16** | **14.28 / 12.91 / 10.63** | reproduces at 1K/4K (May: 70.91 / 84.88 / 84.95); ~128 stays low |
+| ROCm 7.2 baremetal | OFF | 56.46 / 89.10 / 87.16 | 14.28 / 12.91 / 10.63 | reproduces at 1K/4K (May: 70.91 / 84.88 / 84.95) |
 | ROCm 7.2 baremetal | ON | 55.23 / 47.36 / 27.11 | 14.32 / 13.31 / 11.44 | FA ON collapses prefill — as documented |
 | CPU (`-dev none`) | ON | 95.38 / 94.66 / 88.37 | 15.05 / 14.24 / 12.05 | decode reproduces; **prefill does not** (May: 249.57 / 754.82 / 840.50) |
 | CPU (`-dev none`) | OFF | 94.88 / 93.23 / 84.69 | 14.95 / 14.39 / 13.44 | — |
 
 **Vulkan and ROCm both reproduce**, which is the main result: the restored stack performs
-as it did before the reinstall. Vulkan remains the best path — use `-fa 1` for Vulkan and
-`-fa 0` for ROCm.
+as it did before the reinstall. Use `-fa 1` for Vulkan and `-fa 0` for ROCm.
 
 ### The CPU rows were measuring the GPU
 
@@ -46,16 +91,16 @@ iGPU idle while the CPU is under full load).
 
 ### Unresolved: CPU prefill is ~10× below the May figure
 
-With real CPU-only execution and no throttling, prefill measures **85–95 t/s**, stable
-across 8 and 16 threads, cold and warm start, harness and direct `llama-bench`. May
-recorded 840 t/s at 4096. Decode reproduces fine (12.05 vs 12.17), so this is specific to
-prefill, and raising cooling did not close it.
+With real CPU-only execution and no throttling, prefill measures **85–96 t/s**, stable
+across 8 and 16 threads, cold and warm start, harness and direct `llama-bench`, and
+unchanged by both the cooling fix and the BIOS retune. May recorded 840 t/s at 4096.
+Decode reproduces fine, so this is specific to prefill.
 
 Not explained. Two observations, neither conclusive:
 
 - The May shape (249 → 755 → 840, rising 3.4× with context) is not how prefill behaves;
   throughput normally flattens or falls as context grows, which is what the current
-  numbers do (95 → 95 → 88).
+  numbers do (96 → 97 → 90).
 - The model is **7.52 B** parameters total. Sustaining 840 tok/s prefill implies roughly
   12 TFLOP/s; a 5700G's 8 Zen 3 cores on AVX2 are an order of magnitude below that. The
   measured ~90 t/s corresponds to ~1.3 TFLOP/s, which is the right order for this chip.
@@ -66,28 +111,25 @@ the historical CPU prefill rows as suspect until someone reproduces them.
 
 ### Thermals — before and after raising fan speed
 
-Two identical 6-backend sweeps on the same rig, the second after the fan curve was raised:
+Two identical 6-backend sweeps, the second after the fan curve was raised:
 
 | | Before | After |
 | --- | ------ | ----- |
 | Idle | ~50 °C | **40–41 °C** |
 | Peak under load | **105.4 °C** | **89.5 °C** |
 | Average under load | 90.5 °C | **79.7 °C** |
-| Samples ≥ 95 °C (Tjmax) | 27 | **0** |
+| Samples ≥ 95 °C (stock Tjmax) | 27 | **0** |
 | Samples ≥ 100 °C | 22 | **0** |
 | iGPU SCLK under load | 2400 → 2208 MHz | **2400 → 2351 MHz** |
 | CPU clocks | 4000 → 3450 MHz | no downward drift |
 
-The chip no longer exceeds Tjmax and no longer throttles. This also recovered real
-throughput — prefill rose ~6 % on Vulkan, ~8 % on ROCm and ~7 % on CPU purely from
-running cooler, which is why the pre-fix numbers are not published above.
+Throttling stopped, and that alone recovered ~6 % prefill on Vulkan, ~8 % on ROCm and
+~7 % on CPU — which is why numbers measured while this rig throttles are a floor, not a
+result.
 
-> The CPU phase is not a strict A/B between the two sweeps: the earlier one still had the
-> `-ngl 0` bug, so its "CPU" rows ran on the GPU. The Vulkan and ROCm phases are identical
-> workloads in both, and carry the comparison.
-
-> Peak is still 89.5 °C, which is warm for a 65 W APU. A repaste is worth doing; the fan
-> change fixed the throttling but the headroom to Tjmax is only ~5 °C.
+> The CPU phase is not a strict A/B between those two sweeps: the earlier one still had
+> the `-ngl 0` bug, so its "CPU" rows ran on the GPU. The Vulkan and ROCm phases are
+> identical workloads in both and carry the comparison.
 
 ---
 
