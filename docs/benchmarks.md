@@ -2,6 +2,70 @@
 
 Compact benchmark log for llama.cpp on AMD Ryzen 7 5700G / Radeon Vega 8. Latest run is first; older results are kept where they explain behaviour changes.
 
+## Long-context prefill, and a `-ub` limit that hangs the GPU — 2026-09-08
+
+`llama-bench -p <n> -n 0 -b 4096`, 35B, ROCm `-fa 0` / Vulkan `-fa 1`.
+
+| Prompt | ROCm ub 512 | ROCm ub 4096 | Vulkan ub 512 | Vulkan ub 2048 | Vulkan ub 4096 |
+| ------ | ----------: | -----------: | ------------: | -------------: | -------------: |
+| 3 330 | 84.23 | **143.54** | 139.05 | 185.01 | **197.88** |
+| 16 384 | 78.01 | **122.97** | 118.49 | — | **157.78** |
+| 32 768 | 67.38 | **99.31** | 97.90 | **120.09** | ☠ **device lost** |
+
+Two things fall out of this.
+
+### The `-ub` win holds at long context, and the prefill gap narrows
+
+The gain from a larger micro-batch shrinks with context but stays large: ROCm +70 % at
+3.3K, +58 % at 16K, +47 % at 32K. And unlike decode, the ROCm-vs-Vulkan *prefill* gap
+**narrows** as context grows — 27 % at 3.3K, 22 % at 16K — because attention takes a
+growing share of prefill work and attention is F16, so the emulated-dp4a penalty (which
+only hits the quantized FFN and expert GEMMs) is diluted. Vulkan still wins at every
+length; at 32K it wins 120.09 to 99.31 using the largest micro-batch that does not crash.
+
+### `-ub 4096` at 32K context hangs the Vulkan queue
+
+`llama-bench -p 32768 -ub 4096 -fa 1` on Vulkan produces:
+
+```
+terminate called after throwing an instance of 'vk::DeviceLostError'
+  what():  vk::Queue::submit: ErrorDeviceLost
+```
+
+and in `dmesg`:
+
+```
+amdgpu: ring comp_1.0.1 timeout, signaled seq=51833, emitted seq=51835
+amdgpu: Starting comp_1.0.1 ring reset
+amdgpu: Ring comp_1.0.1 reset succeeded
+amdgpu: [drm] device wedged, but recovered through reset
+```
+
+This is a **compute-ring watchdog timeout, not an out-of-memory** — a single dispatch runs
+too long and the driver resets the ring. The GPU recovered on its own and both runtimes
+still enumerate it, but a server would die and the desktop would freeze for a few seconds.
+
+The failures track the `ctx × ubatch` product:
+
+| ctx × ubatch | product | result |
+| ------------ | ------: | ------ |
+| 8192 × 4096 | 33.6 M | OK |
+| 16384 × 4096 | 67.1 M | OK |
+| 32768 × 2048 | 67.1 M | OK |
+| 32768 × 4096 | 134.2 M | **device lost** |
+
+`run/start-llama-server.sh` now derives `UBATCH` as `min(4096, 2^26 / CTX)` unless it is
+set explicitly, which yields 4096 up to 16K context and 2048 at 32K. **This is a
+three-point fit, not a law** — it is a conservative bound, and if a ring reset shows up in
+`dmesg` the answer is to lower `UBATCH` further.
+
+> This corrects a mistake introduced earlier the same day: `UBATCH=4096` was made the
+> launcher default after measuring only at `-c 8192`, and generalised to all context
+> sizes without testing one. Anyone running `CTX=32768` with that default would have hung
+> the GPU.
+
+---
+
 ## Long context: the ROCm gap widens sharply — 2026-09-08
 
 `llama-bench -n 32 -d <depth> -ub 512`, decode t/s at KV depth. `-ub 512` because at

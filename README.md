@@ -61,10 +61,14 @@ win — long-prompt prefill on a dense model — is paid back within ~159 genera
 > **`-fa 1` on ROCm halves prefill** (35B 4K: 53 vs 141). Never use it there. On Vulkan
 > `-fa 1` is best for both metrics.
 
-> **`-ub 4096` is not universally right.** It is worth +58 % to +85 % on 4K prompts, but
-> it *costs* 8–14 % on ~128-token prompts, where the larger buffers do not pay for
-> themselves. Rule of thumb: **ubatch ≈ prompt length**. Override with `UBATCH=1024` (or
-> `512`) for short-prompt chat; it also costs ~2 GB of GTT.
+> **`-ub 4096` is not universally right — and above 16K context it can hang the GPU.**
+> It is worth +47 % to +85 % on long prompts, but it *costs* 8–14 % on ~128-token
+> prompts, and at 32K context on Vulkan it exceeds the compute-ring watchdog: the driver
+> resets the ring (`device wedged, but recovered through reset`) and the server dies with
+> `vk::DeviceLostError`. `start-llama-server.sh` therefore derives `UBATCH` as
+> `min(4096, 2²⁶/CTX)` — 4096 up to 16K context, 2048 at 32K. Set `UBATCH=` yourself to
+> override, lower it if `dmesg` shows a ring reset, and use `UBATCH=1024` or `512` for
+> short-prompt chat. Costs ~2 GB of GTT.
 
 > Full benchmark data in [docs/benchmarks.md](docs/benchmarks.md).
 

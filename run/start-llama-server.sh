@@ -43,10 +43,26 @@ CTX="${CTX:-8192}"
 # Prefill micro-batch. Measured 2026-09-08 on the 35B at a 3330-token prompt
 # (llama-bench, cold prefill): ROCm 84 -> 144 t/s and Vulkan 139 -> 198 t/s going
 # from the upstream default of 512 to 4096. The win comes from filling the MoE
-# expert tiles; it costs ~2 GB of extra GTT at -c 8192. Lower it if memory is
-# tight: UBATCH=1024 keeps most of the gain for ~1K prompts.
+# expert tiles; it costs ~2 GB of extra GTT at -c 8192.
+#
+# The cap is NOT optional. At 32K context with -ub 4096 the Vulkan backend
+# exceeds the GPU's compute-ring watchdog and the driver resets the ring:
+#   amdgpu: ring comp_1.0.1 timeout ... device wedged, but recovered through reset
+# and llama-bench dies with vk::DeviceLostError. Measured 2026-09-08:
+#   ctx  8192 x ub 4096 =  33.6M  OK
+#   ctx 16384 x ub 4096 =  67.1M  OK
+#   ctx 32768 x ub 2048 =  67.1M  OK   (120.1 t/s, the best that works at 32K)
+#   ctx 32768 x ub 4096 = 134.2M  DEVICE LOST
+# The failures track the ctx x ubatch product, so cap it at 2^26. That is a
+# three-point fit, not a law — treat it as a conservative bound and lower UBATCH
+# further if you see a ring reset in dmesg.
 BATCH="${BATCH:-4096}"
-UBATCH="${UBATCH:-4096}"
+if [ -z "${UBATCH:-}" ]; then
+    UBATCH=$(( 67108864 / CTX ))
+    [ "$UBATCH" -gt 4096 ] && UBATCH=4096
+    [ "$UBATCH" -lt 512 ]  && UBATCH=512
+fi
+[ "$BATCH" -lt "$UBATCH" ] && BATCH="$UBATCH"
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
