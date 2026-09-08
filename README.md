@@ -20,25 +20,47 @@ Toolkit for ROCm and Vulkan LLM inference on Vega APUs/GPUs (tested on AMD Ryzen
 
 ## Performance
 
-### Vega 8 iGPU — Qwen3.5-35B-A3B Q4_K_M (`-ngl 99 -c 8192`, September 2026)
+### Vega 8 iGPU — September 2026 baseline (`-ngl 99 -c 8192 -ub 4096`)
 
-Prefill / decode t/s at ~128 / ~1024 / ~4096 tokens. Measured 2026-09-07 on
-Ubuntu 26.04, 16 GB UMA carve-out, after the cooling fix.
+Prefill / decode t/s at ~128 / ~1024 / ~4096 tokens. Measured 2026-09-08 on Ubuntu
+26.04, 16 GB UMA carve-out, after the cooling fix. Each backend at its best flash-
+attention setting.
 
-| Backend | Prefill | Decode | Notes |
-| ------- | ------- | ------ | ----- |
-| **Vulkan `-fa 1`** | **73 / 159 / 154** | **22 / 22 / 21** | **Best overall.** The default (`run/start-llama-server.sh`). Decode barely drops with context |
-| Vulkan `-fa 0` | 67 / 158 / 156 | 21 / 21 / 19 | Prefill equal, decode falls off at 4K — use `-fa 1` |
-| ROCm 7.2 `-fa 0` | 48 / 94 / 89 | 19 / 18 / 15 | Best ROCm setting. ~40 % behind Vulkan on prefill, ~30 % on decode at 4K |
-| ROCm 7.2 `-fa 1` | 44 / 68 / 42 | 19 / 18 / 15 | **Do not use.** FA halves prefill on gfx900 |
-| CPU `-dev none -fa 1` | 88 / 94 / 87 | 18 / 18 / 14 | Genuinely CPU-only (see note below) |
-| CPU `-dev none -fa 0` | 86 / 91 / 87 | 18 / 18 / 17 | Best CPU decode at 4K |
+**Qwen3.5-35B-A3B Q4_K_M** (MoE)
 
-> **`-ngl 0` no longer means CPU-only.** Upstream changed the `-ngl` default to
-> `auto`; with a GPU backend present, `-ngl 0` still offloads (measured: 91 % GPU
-> busy, 6.5 GB in GTT). Use `-dev none`. Every CPU row published here before
-> 2026-09-07 was measured with `-ngl 0` and is therefore not a CPU measurement —
-> see [docs/benchmarks.md](docs/benchmarks.md) for the correction.
+| Backend | Prefill | Decode |
+| ------- | ------- | ------ |
+| **Vulkan `-fa 1`** | **63 / 165 / 190** | **21 / 21 / 21** |
+| ROCm 7.2 `-fa 0` | 44 / 122 / 141 | 19 / 18 / 15 |
+| CPU (`-dev none`) | 84 / 91 / 86 | 18 / 18 / 15 |
+
+**gemma-4-E4B-it Q4_K_M** (dense)
+
+| Backend | Prefill | Decode |
+| ------- | ------- | ------ |
+| **ROCm 7.2 `-fa 0`** | 70 / 111 / **192** | 16 / 14 / 10 |
+| **Vulkan `-fa 1`** | **127 / 173** / 170 | **18 / 18 / 17** |
+| CPU (`-dev none`) | 96 / 94 / 88 | 15 / 14 / 12 |
+
+**Pick the backend by workload, not by reputation:**
+
+| Workload | Use |
+| -------- | --- |
+| Decode, any model, any context | **Vulkan `-fa 1`** — wins everywhere by 13–41 % |
+| Short prompts (~128 tok) | **Vulkan** — wins by 43–81 % |
+| Long prompts, MoE model | **Vulkan `-fa 1`** — wins by 35 % |
+| Long prompts, dense model | **ROCm `-fa 0`** — wins by 13–17 % |
+
+Vulkan remains the right default (`run/start-llama-server.sh` with no flags), but it is
+no longer a clean sweep: on a dense model with long prompts ROCm is measurably faster.
+
+> **`-fa 1` on ROCm halves prefill** (35B 4K: 53 vs 141). Never use it there. On Vulkan
+> `-fa 1` is best for both metrics.
+
+> **`-ub 4096` is not universally right.** It is worth +58 % to +85 % on 4K prompts, but
+> it *costs* 8–14 % on ~128-token prompts, where the larger buffers do not pay for
+> themselves. Rule of thumb: **ubatch ≈ prompt length**. Override with `UBATCH=1024` (or
+> `512`) for short-prompt chat; it also costs ~2 GB of GTT.
 
 > Full benchmark data in [docs/benchmarks.md](docs/benchmarks.md).
 
@@ -120,13 +142,9 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 | **Docker ROCm 6.2.4** (`run/run-docker-rocm.sh`) | ROCm 6 comparison path | Self-contained `rocm/dev-ubuntu-24.04:6.2.4` image; last measured May 2026 (40–64 prefill / 12–14 decode on the 35B). Kept for ROCm-6-vs-7 comparison rather than for use |
 | Baremetal HIP 5.7.1 (Ubuntu repo)   | ❌ broken | HIP 5.7.1 + Clang-21 mismatch — segfaults at slot init               |
 
-> **The tables here are measured at `-ub 512`; the launchers now ship `-ub 4096`.**
-> `bench/run-all-benchmarks.sh` passes no `-b`/`-ub`, so it benchmarks llama.cpp's
-> default micro-batch. Measured 2026-09-08 with `llama-bench` on the 35B at a
-> 3330-token prompt, going from `-ub 512` to `-ub 4096` is worth **+70 % on ROCm**
-> (84 → 144 t/s) and **+42 % on Vulkan** (139 → 198). Every GPU row below is therefore
-> conservative. Re-baselining the tables is open work — see
-> [benchmarks.md](docs/benchmarks.md#prefill-micro-batch--ub--the-largest-tuning-win-found--2026-09-08).
+> **The tables were re-baselined at `-ub 4096` on 2026-09-08** and the harness now sets
+> it for GPU backends (`BENCH_UBATCH=512` reproduces the older numbers). The change was
+> worth +58 % to +85 % on 4K prompts and flipped the dense-model prefill ranking.
 
 **Why baremetal broke in June 2026, and why it works again:** the gfx900-on-gfx90c technique needs (a) `HSA_OVERRIDE_GFX_VERSION=9.0.0` and (b) gfx900 rocBLAS tensile kernels. AMD's modular packages (`amdrocm-core` 7.13/7.14), installed for the R9700s, **rejected** the override (`HSA_STATUS_ERROR_OUT_OF_RESOURCES`) and shipped no gfx9 kernels at all — and since llama.cpp's prefill GEMMs go through rocBLAS, even a native gfx90c rebuild could not have worked there. With the dGPUs moved out and classic ROCm 7.2.0 installed from repo.radeon.com, both preconditions hold again: the runtime accepts the override and the ROCm 6.3.4 tensile backport applies cleanly. `run/run-rocm7-baremetal.sh` still preflight-checks all of this and fails early with instructions if a modular-ROCm host reappears.
 

@@ -2,6 +2,67 @@
 
 Compact benchmark log for llama.cpp on AMD Ryzen 7 5700G / Radeon Vega 8. Latest run is first; older results are kept where they explain behaviour changes.
 
+## Current baseline — 2026-09-08, `-ub 4096`
+
+All backends, both models, re-measured after `-ub` was raised from the upstream default
+of 512. Harness: `bench/run-all-benchmarks.sh`, `-c 8192`, prompts ~141 / ~937 / ~3330
+tokens. GPU backends at `-b 4096 -ub 4096`; the CPU rows stay at the default because
+they are not tile-bound and `start-llama-server.sh --cpu` does not set the flag either.
+
+### Qwen3.5-35B-A3B-Q4_K_M — prefill / decode t/s
+
+| Backend | FA | Prefill | Decode |
+| ------- | -- | ------- | ------ |
+| **Vulkan** | **ON** | **63.25 / 164.54 / 190.20** | **21.15 / 21.15 / 20.76** |
+| Vulkan | OFF | 63.22 / 163.83 / 187.21 | 21.29 / 21.02 / 18.43 |
+| ROCm 7.2 Docker | OFF | 48.09 / 122.91 / 141.99 | 20.19 / 19.11 / 15.52 |
+| ROCm 7.2 baremetal | OFF | 44.22 / 121.77 / 141.00 | 18.50 / 17.85 / 14.70 |
+| ROCm 7.2 Docker | ON | 41.89 / 76.10 / 53.34 | 19.92 / 18.53 / 15.32 |
+| ROCm 7.2 baremetal | ON | 45.61 / 76.01 / 53.47 | 18.73 / 17.48 / 14.58 |
+| CPU (`-dev none`) | ON | 84.11 / 90.77 / 86.38 | 18.39 / 17.94 / 15.03 |
+| CPU (`-dev none`) | OFF | 83.23 / 90.39 / 85.88 | 18.32 / 18.12 / 17.11 |
+
+**Vulkan `-fa 1` is the best backend for this model at every prompt size and for decode.**
+
+### gemma-4-E4B-it-Q4_K_M — prefill / decode t/s
+
+| Backend | FA | Prefill | Decode |
+| ------- | -- | ------- | ------ |
+| **ROCm 7.2 baremetal** | OFF | 69.94 / 110.62 / **192.29** | 15.91 / 14.43 / 10.23 |
+| ROCm 7.2 Docker | OFF | 73.13 / 111.46 / **192.25** | 16.81 / 15.16 / 10.47 |
+| **Vulkan** | **ON** | **126.57 / 173.41** / 170.20 | **18.24 / 17.96 / 16.83** |
+| Vulkan | OFF | 101.02 / 152.28 / 141.85 | 18.16 / 17.07 / 13.28 |
+| ROCm 7.2 baremetal | ON | 65.28 / 48.17 / 30.13 | 16.02 / 14.79 / 12.15 |
+| ROCm 7.2 Docker | ON | 66.98 / 47.39 / 30.15 | 16.66 / 15.34 / 12.67 |
+| CPU (`-dev none`) | ON | 96.05 / 94.31 / 87.83 | 15.08 / 14.24 / 11.96 |
+| CPU (`-dev none`) | OFF | 95.25 / 93.73 / 85.19 | 14.97 / 14.32 / 13.40 |
+
+**On this model ROCm overtakes Vulkan on long-prompt prefill** — 192.3 vs 170.2 at ~3330
+tokens, a 13 % lead. Confirmed independently with `llama-bench` (cold prefill, `-r 2`):
+ROCm 208.57 ± 0.02 vs Vulkan 178.34 ± 0.01, a 17 % lead. Vulkan is already saturated at
+`-ub 512` on gemma (178.34 → 175.82 at 4096) and gains nothing from the larger batch,
+while ROCm gains +85 %.
+
+### Which backend to use
+
+| Workload | Winner | Margin |
+| -------- | ------ | ------ |
+| Long-prompt prefill, **dense** model (gemma) | **ROCm `-fa 0`** | +13 % (harness) / +17 % (llama-bench) |
+| Long-prompt prefill, **MoE** model (35B) | **Vulkan `-fa 1`** | +35 % |
+| Short-prompt prefill (~128 tok), either model | **Vulkan** | +43 % to +81 % |
+| Decode, either model, any context | **Vulkan `-fa 1`** | +13 % to +41 % |
+
+The blanket claim that Vulkan is the better backend on this GPU no longer holds. It is
+still the right default — it wins decode everywhere, wins short prompts everywhere, and
+wins the MoE model outright — but for long prompts on a dense model ROCm is now faster.
+
+> **Thermal note:** the gemma sweep peaked at 94.1 °C against the board-set 99 °C limit,
+> so those numbers may be slightly depressed; the 35B sweep peaked at 82.8 °C and was
+> clean. The `llama-bench` confirmation above was run from a 49 °C cold start and agrees,
+> so the gemma conclusion does not rest on the warm run.
+
+---
+
 ## Prefill micro-batch (`-ub`) — the largest tuning win found — 2026-09-08
 
 `llama-bench`, cold prefill, Qwen3.5-35B-A3B-Q4_K_M, `-ngl 99 -b 4096 -r 2`.

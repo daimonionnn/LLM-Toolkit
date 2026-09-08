@@ -33,6 +33,17 @@ if [ -n "${BENCH_MODELS:-}" ]; then
     read -r -a MODELS <<< "$BENCH_MODELS"
 fi
 
+# Prefill micro-batch for the GPU backends. The upstream default is 512, which
+# is what every table dated before 2026-09-08 was measured at. Measured on the
+# 35B at a 3330-token prompt (llama-bench, cold prefill): ROCm 84 -> 144 t/s and
+# Vulkan 139 -> 198 going from 512 to 4096, because a 512-token ubatch leaves
+# MMQ's 64-column MoE expert tiles three-quarters empty. Costs ~2 GB of GTT.
+# The CPU backend is deliberately left at the default — it is not tile-bound and
+# start-llama-server.sh --cpu does not set the flag either.
+# Set BENCH_UBATCH=512 to reproduce the pre-2026-09-08 tables.
+BENCH_BATCH="${BENCH_BATCH:-4096}"
+BENCH_UBATCH="${BENCH_UBATCH:-4096}"
+
 # llama-server port (all backends share the same port sequentially)
 SERVER_PORT=8080
 
@@ -136,6 +147,7 @@ start_rocm7_docker() {
         -m "/models/$(basename "$CURRENT_MODEL")" \
         $fa_flag \
         -ngl 99 \
+        -b "$BENCH_BATCH" -ub "$BENCH_UBATCH" \
         -c "$CONTEXT_SIZE" \
         --no-warmup \
         >/tmp/bench-server.log 2>&1 &
@@ -168,6 +180,7 @@ start_rocm6_docker() {
         -m "/models/$(basename "$CURRENT_MODEL")" \
         $fa_flag \
         -ngl 99 \
+        -b "$BENCH_BATCH" -ub "$BENCH_UBATCH" \
         -c "$CONTEXT_SIZE" \
         --no-warmup \
         >/tmp/bench-server.log 2>&1 &
@@ -205,6 +218,7 @@ start_rocm7_baremetal() {
         -m "$CURRENT_MODEL" \
         $fa_flag \
         -ngl 99 \
+        -b "$BENCH_BATCH" -ub "$BENCH_UBATCH" \
         -c "$CONTEXT_SIZE" \
         --host 0.0.0.0 \
         --port "$SERVER_PORT" \
@@ -255,6 +269,7 @@ start_vulkan_gpu() {
         $fa_flag \
         -ngl 99 \
         -dev Vulkan0 \
+        -b "$BENCH_BATCH" -ub "$BENCH_UBATCH" \
         -c "$CONTEXT_SIZE" \
         --host 0.0.0.0 \
         --port "$SERVER_PORT" \

@@ -12,6 +12,13 @@ contradicted by a measurement?*, *is the gain physically plausible?* Items marke
 on an agent's cited file:line or binary metadata that was not independently
 re-extracted.
 
+> **Superseded in part, 2026-09-08.** Recommendation 1 (`-ub 4096`) was implemented and
+> measured far larger than estimated, which changed the headline conclusion: ROCm now
+> beats Vulkan on long-prompt prefill for dense models. The prefill gap figures below
+> were all measured at `-ub 512`. The diagnosis of *why* ROCm trails on the MoE model —
+> emulated dp4a — still stands. See
+> [benchmarks.md](benchmarks.md#current-baseline--2026-09-08--ub-4096).
+
 Starting point (Qwen3.5-35B-A3B Q4_K_M, `-c 8192`, prefill / decode t/s at ~128/~1K/~4K):
 
 | | Prefill | Decode |
@@ -123,7 +130,7 @@ Score = (expected gain × confidence) / effort. "Test" names the exact command.
 
 | # | Change | Expected | Why it should work |
 |---|---|---|---|
-| 1 | **`-ub 4096`** — DONE 2026-09-08, adopted in all three launchers | **Measured +70 % ROCm prefill at 4K** (84.2 → 143.5 t/s) and **+42 % on Vulkan** (139.1 → 197.9). Estimate above was +18-22 %; the real figure is far larger because the June estimate came from the server harness (warm-KV incremental prefill), which flattens the effect. Optimum is `ubatch ≥ prompt length`. Costs ~2 GB GTT. |
+| 1 | **`-ub 4096`** — DONE 2026-09-08, adopted in all launchers and the harness | **+58 % to +85 % prefill at 4K**, the largest win in this audit. 35B: ROCm 84 → 144, Vulkan 139 → 198 (llama-bench). gemma: ROCm 113 → 209, Vulkan saturated. Estimate above was +18-22 % — far too low, because the June figure came from the server harness, which reports warm-KV incremental prefill and flattens the effect. **It also overturned the audit's premise:** on the dense gemma, ROCm at `-ub 4096` (208.6) now *beats* Vulkan (178.3) on long-prompt prefill. Optimum is `ubatch ≥ prompt length`; costs ~2 GB GTT and *hurts* ~128-token prompts by 8-14 %. |
 | 2 | **Pin `-fa 0` in `run/run-rocm7-baremetal.sh`** | **DONE 2026-09-08** — was costing 57 % of prefill | Confirmed by measurement, not inference: gemma, 3330-token prompt, `-fa 0` = 112.78 t/s, `-fa 1` = 48.91, **`-fa auto` = 48.90**. The launcher passed no `-fa`, so every launch through it ran with FA on. Fixed; still overridable. |
 | 3 | **Fix the harness** (warmup request, `cache_prompt:false` or `llama-bench -d`, `-r 3`) | trust, not speed | Section 2. Cheapest change with the largest effect on decision quality. |
 | 4 | `-ctk q8_0` (with `-fa 0`; `-ctv` needs FA) | decode 4K +3-4 % | June: +3.5 % at 4K. Never combined with `-ub 2048`, never on baremetal. |
