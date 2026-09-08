@@ -2,6 +2,49 @@
 
 Compact benchmark log for llama.cpp on AMD Ryzen 7 5700G / Radeon Vega 8. Latest run is first; older results are kept where they explain behaviour changes.
 
+## Cheap tuning items settled — 2026-09-08
+
+### `-ctk q8_0`: small at 4K, large at 32K
+
+Quantizing the K cache to q8_0 (V stays f16 — quantizing V requires flash attention,
+which ROCm cannot use here). 35B, ROCm `-fa 0`, decode t/s by depth:
+
+| Depth | `-ctk f16` | `-ctk q8_0` | Gain |
+| ----- | ---------: | ----------: | ---: |
+| 1 024 | 18.10 | 18.58 | +2.7 % |
+| 4 096 | 15.09 | 16.11 | +6.8 % |
+| 16 384 | 9.32 | 10.89 | +16.8 % |
+| 32 768 | 6.16 | **7.61** | **+23.5 %** |
+
+The June 2026 sweep measured this as "+3.5 %, small" and did not adopt it. That was
+correct *at 4K* — the effect simply was not measured where it matters. **Adopt it for
+long-context ROCm work**; at short context the gain is noise and costs K-cache precision.
+
+It also decomposes the long-context decode collapse. Halving the K cache would nearly
+double throughput if KV bandwidth were the whole bottleneck; it gives +23.5 %, so KV
+bandwidth is roughly a quarter of the problem at 32K. The rest is the `mmvf` dispatch
+structure — one block per KV row, GQA ratio not folded, so each K head is re-streamed by
+all 8 of its Q heads — plus the V cache, which cannot be quantized without FA. Neither is
+reachable with a flag; both need the flash-attention kernel fixed.
+
+### Clock pinning and the COMPUTE power profile: no effect
+
+35B, `-ub 4096`, `-p 3330 -n 32`:
+
+| Setting | Prefill | Decode |
+| ------- | ------: | -----: |
+| `auto` (default) | 129.63 | 19.11 |
+| `power_dpm_force_performance_level=high` | 130.96 | 19.01 |
+| `pp_power_profile_mode=5` (COMPUTE) | 130.73 | 19.19 |
+
+All within ±1 %, i.e. noise. June measured `high` as worth +3 % prefill and this run does
+not reproduce that — **because the cooling fix removed the reason**. In June the GPU was
+throttling, so pinning the top DPM state helped; now SCLK holds 2400 MHz under load on its
+own and there is nothing left to pin. Not adopted; it needs root and does not survive a
+reboot for no measurable gain.
+
+---
+
 ## Long-context prefill, and a `-ub` limit that hangs the GPU — 2026-09-08
 
 `llama-bench -p <n> -n 0 -b 4096`, 35B, ROCm `-fa 0` / Vulkan `-fa 1`.
