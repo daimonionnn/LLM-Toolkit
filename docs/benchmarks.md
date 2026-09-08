@@ -2,6 +2,71 @@
 
 Compact benchmark log for llama.cpp on AMD Ryzen 7 5700G / Radeon Vega 8. Latest run is first; older results are kept where they explain behaviour changes.
 
+## Flash attention fixed on gfx900 — the long-context collapse is gone — 2026-09-08
+
+A one-field change to the FA tile config removes the anomaly that made ROCm decode
+unusable at long context. Shipped as
+[`patches/0001-fattn-tile-gcn-occupancy.patch`](../patches/README.md).
+
+### The bug
+
+`ggml_cuda_fattn_tile_get_config` routes every non-RDNA AMD part to a table shared with
+CDNA. CDNA has 256–512 AGPRs that a kernel can spill into cheaply; **GCN5 has none** — a
+SIMD holds 256 VGPRs and nothing else. The table's `occupancy = 2` therefore caps every
+kernel at 128 VGPRs and the rest goes to scratch memory.
+
+Measured on gfx900 with `-Rpass-analysis=kernel-resource-usage`: **50 of 60 table rows
+spill**, up to 2262 VGPRs and 2.9 KB/lane of scratch. The shapes our models use:
+
+| Kernel | Used by | VGPR | Spill @ occ 2 | Spill @ occ 1 |
+| ------ | ------- | ---: | ------------: | ------------: |
+| `<256,256,1,8>` | Qwen 35B decode | 128 → 256 | 259 | **26** |
+| `<256,256,4,8>` | Qwen 35B prefill | 128 → 256 | 633 | **233** |
+| `<512,512,·,·>` | gemma | 128 → 256 | up to 2262 | — |
+
+Total spills across the 256×256 rows: 10 598 → 4 331.
+
+### The effect
+
+Decode t/s at KV depth, `llama-bench -n 32 -d -ub 512`:
+
+| Model | Depth | `-fa 0` (was best) | `-fa 1` before | `-fa 1` **after** | vs. best before |
+| ----- | ----- | -----------------: | -------------: | ----------------: | --------------: |
+| Qwen 35B | 1 024 | 18.11 | — | **19.04** | +5 % |
+| Qwen 35B | 4 096 | 15.12 | 14.95 | **18.54** | +23 % |
+| Qwen 35B | 16 384 | 9.31 | — | **16.75** | +80 % |
+| Qwen 35B | 32 768 | 6.16 | *timed out* | **14.87** | **+141 %** |
+| gemma | 4 096 | 13.56 | 13.08 | **15.44** | +14 % |
+| gemma | 32 768 | 7.61 | 5.97 | **12.31** | **+62 %** |
+
+Prefill also improves, though `-fa 0` still wins there: 35B at 3330 tokens goes
+51.26 → 71.63 with FA on, against 84.23 without.
+
+### What this changes
+
+**`-fa 1` is now the right setting for ROCm decode.** Every table and every launcher note
+in this repo said the opposite, correctly, until this patch.
+
+**The long-context collapse is gone.** ROCm decode fell 66 % from 1K to 32K; it now falls
+22 %. Vulkan falls 21 % — the curves match. The gap to Vulkan at 32K drops from 178 % to
+13 %.
+
+The remaining ~13 % is consistent with the audit's diagnosis: emulated dp4a on the
+quantized GEMMs, which this patch does not touch. The other half of that fix —
+`v_mad_mix_f32` for the KQ MAC, which gfx900 supports and llama.cpp does not emit — is
+still open.
+
+### Validation
+
+- `test-backend-ops test -o FLASH_ATTN_EXT -b ROCm0`: **2959/2959 passed**, both before
+  and after the patch was rewritten to be GCN-specific.
+- `-fa 0` numbers are unchanged to two decimals (gemma 13.56 / 7.60 before and after),
+  confirming nothing outside the FA path moved.
+- Only the 256×256 and 512×512 shapes were benchmarked. The mechanism applies to all 50
+  spilling rows, but the rest are untested.
+
+---
+
 ## Cheap tuning items settled — 2026-09-08
 
 ### `-ctk q8_0`: small at 4K, large at 32K

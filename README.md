@@ -46,8 +46,8 @@ attention setting.
 
 | Workload | Use |
 | -------- | --- |
-| Decode, any model, any context | **Vulkan `-fa 1`** — wins everywhere, by 19 % at 1K context and **178 % at 32K** |
-| Long context (≥ 16K) | **Vulkan** — ROCm decode collapses to 6–8 t/s and is not usable |
+| Decode, any model, any context | **Vulkan `-fa 1`** — still ahead, but by 13 % rather than the 178 % it was before the FA patch |
+| Long context (≥ 16K) | **Vulkan**, or ROCm `-fa 1` with the FA patch (14.9 t/s at 32K vs Vulkan's 17.1) |
 | Short prompts (~128 tok) | **Vulkan** — wins by 43–81 % |
 | Long prompts, MoE model | **Vulkan `-fa 1`** — wins by 35 % |
 | Long prompt + **short** answer, dense model | **ROCm `-fa 0`** — 13–17 % faster prefill, but only up to ~159 generated tokens |
@@ -58,8 +58,13 @@ win — long-prompt prefill on a dense model — is paid back within ~159 genera
 (−66 % from 1K to 32K, against Vulkan's −21 %). See
 [benchmarks.md](docs/benchmarks.md#long-context-the-rocm-gap-widens-sharply--2026-09-08).
 
-> **`-fa 1` on ROCm halves prefill** (35B 4K: 53 vs 141). Never use it there. On Vulkan
-> `-fa 1` is best for both metrics.
+> **`-fa 1` on ROCm: use it for decode, not for prefill — and only with the local
+> patch.** [`patches/0001-fattn-tile-gcn-occupancy.patch`](patches/README.md) gives GCN5
+> its own flash-attention occupancy; without it every FA kernel spills hundreds of
+> registers to scratch. With it, ROCm decode at 32K goes 6.16 → **14.87 t/s (+141 %)** on
+> the 35B and 7.61 → **12.31 (+62 %)** on gemma, and the long-context collapse disappears
+> (−22 % from 1K to 32K, matching Vulkan's −21 %). Prefill still prefers `-fa 0`
+> (84 vs 72 t/s). On Vulkan `-fa 1` remains best for both.
 
 > **`-ub 4096` is not universally right — and above 16K context it can hang the GPU.**
 > It is worth +47 % to +85 % on long prompts, but it *costs* 8–14 % on ~128-token

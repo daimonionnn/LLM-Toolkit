@@ -284,6 +284,9 @@ export ROCM_PATH
 # Note: GGML_HIP_UMA and GGML_FLASH_ATTN are no longer llama.cpp CMake
 # options (UMA was removed upstream; FA is a runtime flag, -fa). GPU_TARGETS
 # replaces the deprecated AMDGPU_TARGETS spelling.
+# Local patches — see patches/README.md
+. "$(dirname "$0")/apply-patches.sh"
+
 cmake -B build-rocm7 \
     -DGGML_HIP=ON \
     -DGPU_TARGETS="$AMDGPU_TARGET" \

@@ -104,6 +104,9 @@ build() {
     #   CMAKE_INSTALL_RPATH   — upstream installs libllama-*-impl.so into lib/,
     #                           while executables land in bin/, so $ORIGIN alone
     #                           leaves the installed binaries unable to start.
+    # Local patches — see patches/README.md
+    . "$(dirname "$0")/apply-patches.sh"
+
     cmake -B build-vulkan \
         -DGGML_VULKAN=ON \
         -DCMAKE_BUILD_TYPE=Release \

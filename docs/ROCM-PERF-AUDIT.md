@@ -159,7 +159,8 @@ Score = (expected gain × confidence) / effort. "Test" names the exact command.
 | # | Change | Expected | Notes |
 |---|---|---|---|
 | 14 | **GCN MMQ config**: route `GGML_CUDA_CC_IS_GCN` to the `pascal_dp4a` table (I=64) in `mmq.cuh:243` + device `#elif defined(GCN)` | 35B prefill +0-8 % | Two lines. Halves the tile so the 512-row expert matrices and 128-VGPR cap fit without spilling. Could regress if LDS-bound; `test-backend-ops perf -o MUL_MAT_ID` settles it in minutes. |
-| 15 | **FA tile GCN config** (occupancy 1 or smaller tile for D ≥ 128) + **`v_mad_mix_f32` MAC** for gfx900 in `ggml_cuda_mad(float&, half2, half2)` with `-fgpu-flush-denormals-to-zero` | FA-ON prefill 4K: 41.5 → ~85-95 (parity with FA OFF); **decode 4K 14.7 → ~17-18** via the GQA-fused tile decode and unlocking `-ctv q8_0` | This is the one that targets the context falloff (mechanism f). Medium effort; illegal-instruction risk if the mad-mix probe is wrong — check `llvm-mc` first. |
+| 15a | **FA tile GCN occupancy** — **DONE 2026-09-08**, `patches/0001` | Estimate was "decode 4K 14.7 → ~17-18". Actual: **4K 15.12 → 18.54, 32K 6.16 → 14.87 (+141 %)**, and the long-context collapse is gone entirely. Verified 2959/2959 on `test-backend-ops`; `-fa 0` unchanged. |
+| 15b | **`v_mad_mix_f32` MAC** for gfx900 with `-fgpu-flush-denormals-to-zero` | still open | Confirmed available: LLVM reports `mad-mix-insts` for gfx900 and emits `v_mad_mix_f32 v0, v0, v1, v2 op_sel_hi:[1,1,0]`. Would cut the KQ MAC from ~2.5 VALU ops to 1. The remaining ~13 % gap to Vulkan is the likely target. |
 | 16 | mmvf: fold the GQA ratio into `ncols_dst` (Vulkan's p021 trick) | decode 4K +15-20 % with `-fa 0` | Alternative to #15 for the same falloff. Larger patch, strided-dst correctness cases. First run `llama-bench -fa 0,1 -d 128,4096` — if FA0 == FA1 at 4096 the mechanism is refuted. |
 
 ### Tier 5 — algorithmic, workload-dependent
