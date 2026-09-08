@@ -32,22 +32,43 @@ Vulkan2: AMD Radeon AI PRO R9700 (RADV GFX1201) — 32 GB dedicated VRAM
 
 ## Performance Summary
 
-This repository now treats **ROCm 7.2 baremetal on the Vega 8 iGPU** as the default llama-server path. Vulkan remains the best decode/interactive path on Vega 8, and CPU FA ON has the strongest large-context prefill.
+**Vulkan is the default** (`run/start-llama-server.sh` with no flags) and wins decode at
+every context. ROCm is competitive and wins two specific cases. Measured 2026-09-08 with
+`-ub 4096` (GPU backends) and the local FA patch; full data in [benchmarks.md](benchmarks.md).
 
-Qwen3.5-35B-A3B Q4_K_M (`-ngl 99 -c 8192`, unless noted):
+Qwen3.5-35B-A3B Q4_K_M, `-ngl 99 -c 8192`, prefill / decode t/s at ~128 / ~1K / ~4K:
 
-| Backend | Prefill (t/s) | Generation (t/s) | Notes |
-|---------|--------------|------------------|-------|
-| **CPU FA ON** (`-ngl 0`) | **57–233** | 13–16 | **Best prefill overall** — AVX2 SDPA scales ~4× at large context |
-| CPU FA OFF (`-ngl 0`) | 56–226 | 12–14 | Very similar; use `-fa 1` |
-| Vulkan native (`-dev Vulkan0`) | 45–50 | **19–20** | **Best generation** — stable across all contexts |
-| **ROCm 6.2.4 FA OFF** | **40–64** | **12–14** | `-fa 0` recommended — FA ON hurts 33–83% at large context |
-| ROCm 6.2.4 FA ON | 35–49 | 11–13 | Suboptimal on Vega 8 |
-| **ROCm 7.2 Baremetal FA OFF** | **39–69** | **11–15** | Default launcher path; near-identical to Docker, no container overhead |
-| ROCm 7.2 Baremetal FA ON | 35–52 | 12–15 | FA ON hurts prefill at ≥1K tokens; use `-fa 0` |
-| **ROCm 7.2 Docker FA OFF** | **39–70** | **12–15** | Same gfx900 tensile backport, containerized |
-| ROCm 7.2 Docker FA ON | 36–53 | 12–15 | Same FA penalty as baremetal |
-> Full details in [benchmarks.md](benchmarks.md).
+| Backend | Prefill | Decode | Notes |
+|---------|---------|--------|-------|
+| **Vulkan `-fa 1`** | **63 / 165 / 190** | **21 / 21 / 21** | Best overall for this model |
+| ROCm 7.2 `-fa 0` | 44 / 122 / 141 | 19 / 18 / 15 | Best ROCm *prefill* setting |
+| ROCm 7.2 `-fa 1` + FA patch | 45 / 76 / 53 | **19 / 19 / 19** | Best ROCm *decode* setting — see below |
+| CPU (`-dev none`) | 84 / 91 / 86 | 18 / 18 / 15 | Genuinely CPU-only; `-ngl 0` is **not** |
+
+gemma-4-E4B-it Q4_K_M (dense) at ~4K prompt: **ROCm `-fa 0` 192 t/s beats Vulkan's 170**.
+That is the one prefill case ROCm wins, and it is worth only ~159 generated tokens before
+Vulkan's faster decode takes it back.
+
+### Decode at long context — where the backends actually differ
+
+t/s at KV depth, 35B:
+
+| Depth | ROCm `-fa 0` | ROCm `-fa 1` (patched) | Vulkan `-fa 1` |
+| ----- | -----------: | ---------------------: | -------------: |
+| 1 024 | 18.11 | 19.04 | 21.69 |
+| 4 096 | 15.12 | 18.54 | 21.18 |
+| 16 384 | 9.31 | 16.75 | 19.22 |
+| 32 768 | 6.16 | **14.87** | 17.10 |
+
+Without the FA patch ROCm decode collapses (−66 % from 1K to 32K) because `-fa 0` forces
+attention through `mmvf`, which launches one block per KV row and does not fold the GQA
+ratio. With it, ROCm falls 22 % and Vulkan 21 % — the curves match, and the gap at 32K
+drops from 178 % to 13 %. See [patches/README.md](../patches/README.md).
+
+> **Two settings that are not what they look like.** `-ngl 0` no longer forces CPU-only
+> execution (use `-dev none`), and `-fa auto` resolves to *on* for ROCm, which is the wrong
+> setting for prefill. Both silently cost performance; both are documented in
+> [benchmarks.md](benchmarks.md).
 
 ## GPU Architecture Generations
 
@@ -82,15 +103,22 @@ The ISA (instruction set architecture) is identical between gfx900 and gfx90c. C
 Two hardware facts bound what any amount of build/flag tuning can achieve on this iGPU:
 
 1. **No hardware `dp4a`.** The byte-wise integer dot-product instruction that llama.cpp's quantized matmul (MMQ) kernels depend on first appears on **Vega 20 / gfx906** (`ggml/src/ggml-cuda/common.cuh` — "VEGA20 … minimum for dp4a"). gfx900/gfx90c lacks it, so MMQ runs through a **software-emulated** dp4a: `common.cuh:717-730` emits 4× `v_mul_i32_i24` (SDWA byte selects) + 2× `v_add3_u32`, i.e. **6 VALU instructions per 4 MACs** (an earlier revision of this file said "≈3 instructions per op" — that was wrong). llama.cpp reacts to this with an explicit rule at `mmq.cu:378-383`: on Vega, MMQ is used **only for MoE experts**, while dense matmuls go to rocBLAS/Tensile (dequantize → FP16 GEMM) using the gfx900 kernels backported from ROCm 6.3.4. This is the dominant reason ROCm trails Vulkan on prefill: RADV's shaders do the same work with packed FP16 FMA at 2 MACs per instruction.
-2. **Shared DDR4 bandwidth (~40–50 GB/s).** Decode reads the active weights once per token, so token rate is bandwidth-bound, not compute-bound. For the 35B-A3B MoE (~3B active params at Q4 ≈ 1.5–1.7 GB/token) the theoretical ceiling is ~25–30 t/s; measured ROCm decode is 12–15 t/s and Vulkan/RADV reaches 19–20 t/s on the *same* silicon — so ROCm's decode kernels, not the memory wall, are the limiter, and **Vulkan remains the better decode backend**.
+2. **Flash attention was unusable — now fixed by a local patch.** The FA tile config
+   shared with CDNA caps gfx900 kernels at 128 VGPRs (CDNA spills into AGPRs, GCN5 has
+   none), so 50 of 60 table rows spilled, up to 2262 registers. `patches/0001` gives GCN
+   its own occupancy; ROCm decode at 32K went 6.16 → 14.87 t/s. This removed what used to
+   be the largest ROCm deficit.
+3. **Shared DDR4 bandwidth (~40–50 GB/s).** Decode reads the active weights once per token, so token rate is bandwidth-bound, not compute-bound. For the 35B-A3B MoE (~3B active params at Q4 ≈ 1.5–1.7 GB/token) the theoretical ceiling is ~25–30 t/s; measured ROCm decode is 12–15 t/s and Vulkan/RADV reaches 19–20 t/s on the *same* silicon — so ROCm's decode kernels, not the memory wall, are the limiter, and **Vulkan remains the better decode backend**.
 
 What this means for tuning the ROCm 7 build:
 
 | Lever | Type | Expected effect on Vega 8 |
 | --- | --- | --- |
-| `-ub` / `-b` ubatch/batch size | runtime | Main prefill knob — 8 CUs may prefer a different ubatch than the default 512 |
-| `-ctk q8_0` (K-cache quant) | runtime | Cuts KV read bandwidth; helps decode most at large context. `-ctv` needs flash attention, which loses on Vega (use `-fa 0`), so K-only |
-| `rocm-smi --setperflevel high` | runtime | Pins GPU clocks; trades shared CPU/APU power budget — can help or hurt |
+| `-ub` / `-b` ubatch/batch size | runtime | **The largest single knob.** 512 → 4096 is worth +47 % to +85 % prefill on long prompts. Cap it by context: `ctx × ubatch > 2²⁶` hangs the Vulkan compute ring |
+| `-ctk q8_0` (K-cache quant) | runtime | **Scales with context**: +2.7 % at 1K, +23.5 % at 32K. `-ctv q8_0` needs flash attention, which is usable on ROCm only with the local FA patch |
+| `-fa 1` | runtime | **With the FA patch: best ROCm decode setting** (+141 % at 32K). Without it, or for prefill, use `-fa 0` |
+| FA tile occupancy for GCN | patch | `patches/0001` — the CDNA-shared config caps gfx900 kernels at 128 VGPRs and spills; 50 of 60 table rows affected |
+| `rocm-smi --setperflevel high` | runtime | **No effect since the cooling fix.** June measured +3 % on a throttling GPU; SCLK now holds 2400 MHz unaided |
 | `GGML_CUDA_FORCE_MMQ=ON` | build | **Cannot affect decode.** Decode (batch ≤ 8) is served by MMVQ, chosen before `ggml_cuda_should_use_mmq` is consulted; the flag only moves *dense prefill* GEMMs onto emulated dp4a. Measured a wash on the 35B in June 2026 — expected, since its experts were already on MMQ |
 | `GGML_CUDA_F16` | build | **Gone** — no longer a CMake option; FP16 paths are auto-selected by arch (gfx900 has fast packed FP16) |
 | `GGML_HIP_ROCWMMA_FATTN`, `GGML_HIP_MMQ_MFMA` | build | **N/A** — require CDNA MFMA units; GCN5 has none |
@@ -209,7 +237,7 @@ The known-bad paths remain useful for historical context:
 | gfx90c support | gfx900 override + tensile backport | Native RADV | gfx900 override + tensile backport | gfx900 override + FP8 stub | gfx900 override | Native gfx90c |
 | Setup complexity | `setup/` + `build/` once, then `run/start-llama-server.sh` | Native Vulkan build | `./run/run-docker-rocm7.sh` | `./run/run-docker-rocm.sh` | Build + patches | Docker, but crashes |
 | Stability | **✅ Stable** | **✅ Stable** | **✅ Stable** | **✅ Stable** | Segfaults | Kernel crashes |
-| Vega 8 perf (35B) | **48–94 / 15–19 t/s** (FA OFF) | **73–159 / 21–22 t/s** (FA ON) | **47–94 / 15–20 t/s** (FA OFF) | 40–64 / 12–14 t/s (May 2026) | N/A | N/A |
+| Vega 8 perf (35B) | **44–141 / 15–19 t/s** (`-fa 0`, `-ub 4096`) | **63–190 / 21–22 t/s** (`-fa 1`) | **48–142 / 16–20 t/s** | 40–64 / 12–14 t/s (May 2026) | N/A | N/A |
 | Best use | ROCm server on classic ROCm 7.2 hosts | Best decode/interactive (default) | Recommended ROCm path | ROCm 6 comparison | Historical only | Historical only |
 | Crash risk | None observed | None observed | None observed | None observed | Segfaults / hangs | MODE2 reset |
 | Multi-GPU isolation | HSA agent auto-detect (`ROCR_VISIBLE_DEVICES=0` — the Vega is the only GPU now) | `-dev Vulkan0` (auto-detected) | PCI ID render-node isolation | PCI ID render-node isolation | N/A | N/A |
@@ -245,7 +273,13 @@ The known-bad paths remain useful for historical context:
 - `gfx900:xnack-` with Wave Size 64 — correct Vega 8 (GCN5/Wave64) execution
 - Confirmed stable 2026-05-14: Qwen3.5-35B-A3B-Q4_K_M and Gemma 4 E4B, full offload, sustained inference, no crash
 
-**Primary repository recommendation (June 2026):** Vulkan via `run/start-llama-server.sh` (default — best decode, unaffected by host ROCm changes). **Use ROCm 7.2 Docker** via `--rocm-docker` for the best GPU prefill. Baremetal ROCm (`--rocm`) only applies to hosts with classic ROCm 7.0–7.2 — the current host's modular `amdrocm-core` 7.13+/gfx120x install broke it (see README "ROCm on Vega 8").
+**Primary repository recommendation (September 2026):** Vulkan via
+`run/start-llama-server.sh` (default — wins decode at every context and every model, and
+needs no ROCm stack). ROCm is worth reaching for in two cases: long-prompt prefill on a
+*dense* model, where `-fa 0` beats Vulkan (gemma at 4K: 192 vs 170 t/s), and long-context
+decode with the local FA patch, where it closes to within 13 % of Vulkan. Baremetal and
+Docker ROCm perform identically; both need classic ROCm 7.0–7.2, and the scripts abort
+early on AMD's modular `amdrocm-core` packages, which reject the gfx900 override.
 
 ### Multi-GPU isolation (Vega 8 + 2× Radeon AI PRO R9700)
 

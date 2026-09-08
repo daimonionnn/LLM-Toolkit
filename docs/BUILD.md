@@ -66,6 +66,28 @@ chmod +x build/build-llamacpp-rocm-vega.sh
 ./build/build-llamacpp-rocm-vega.sh
 ```
 
+### Pinned commit and local patches
+
+All four build paths — the baremetal script, the Vulkan script and both Dockerfiles —
+compile the **same llama.cpp commit**, taken from [`build/llama.cpp-ref`](../build/llama.cpp-ref).
+They each used to clone `master` independently, which on 2026-09-08 produced a baremetal
+install at `465e49b` and a Docker image at `67672dc` and made the two non-comparable.
+
+The scripts read the pin through `build/llama-cpp-ref.sh`; the Dockerfiles take it as
+`ARG LLAMA_CPP_REF`, passed by `run/run-docker-rocm*.sh`. It must be a full 40-character
+SHA — `git fetch --depth 1 origin <short-sha>` fails with "couldn't find remote ref", and
+a script that ignores that silently compiles whatever the checkout already had.
+
+After checkout, `build/apply-patches.sh` applies everything in
+[`patches/`](../patches/README.md) in filename order. Currently one patch, which gives
+GCN5 its own flash-attention occupancy and is worth +141 % ROCm decode at 32K context.
+**A patch that no longer applies is a hard error**, not a warning: it means the pin moved
+and the patch needs re-validating, and building without it would quietly undo a measured
+improvement.
+
+To move the pin: edit `build/llama.cpp-ref`, rebuild every path, re-check that each patch
+still applies, and re-run the benchmarks that justify them.
+
 ### What the Build Script Does
 
 1. **Clones/updates** llama.cpp from `ggml-org/llama.cpp` master branch

@@ -83,6 +83,51 @@ bash run/run-rocm7-baremetal.sh /path/to/model.gguf -ngl 99
 
 ## Common Errors
 
+### `vk::DeviceLostError` / `amdgpu: ring comp_1.0.1 timeout` — micro-batch too large for the context
+
+```
+terminate called after throwing an instance of 'vk::DeviceLostError'
+  what():  vk::Queue::submit: ErrorDeviceLost
+```
+
+and in `dmesg`:
+
+```
+amdgpu: ring comp_1.0.1 timeout, signaled seq=..., emitted seq=...
+amdgpu: Starting comp_1.0.1 ring reset
+amdgpu: [drm] device wedged, but recovered through reset
+```
+
+**Cause:** a single compute dispatch runs longer than the driver's watchdog. It is *not*
+out of memory. Measured 2026-09-08 on Vulkan: `ctx 32768 × ub 4096` hangs;
+`ctx 16384 × ub 4096` and `ctx 32768 × ub 2048` are fine. Failures track the
+`ctx × ubatch` product crossing roughly 2²⁶.
+
+**Fix:** lower the micro-batch. `run/start-llama-server.sh` derives it automatically as
+`min(4096, 2²⁶/CTX)`; if you pass `-ub` yourself, keep the product under that. The GPU
+recovers on its own via a ring reset, but the server process dies.
+
+### `-ngl 0` does not run on the CPU
+
+`-ngl 0` used to mean "no GPU offload". Upstream changed the `-ngl` default to `auto`, and
+with a GPU backend present the model is still offloaded — measured 91 % GPU busy and
+6.5 GB in GTT with `-ngl 0`, versus 157 MB with `-dev none`.
+
+**Use `-dev none`.** Any CPU benchmark or comparison made with `-ngl 0` on current
+llama.cpp is measuring the GPU. This affected both this repo's benchmark harness and
+`start-llama-server.sh --cpu`; both are fixed.
+
+### `-fa auto` silently enables flash attention on ROCm, halving prefill
+
+`-fa` defaults to `auto`, which probes the backend. On gfx900 the probe succeeds — the
+generic FA tile kernel compiles — so FA is enabled, and without the local FA patch that is
+the worst setting for prefill. Measured on gemma at a 3330-token prompt:
+`-fa 0` = 112.8 t/s, `-fa 1` = 48.9, **`-fa auto` = 48.9**.
+
+Pass `-fa` explicitly. `run/run-rocm7-baremetal.sh` now defaults to `-fa 0`.
+
+
+
 ### "no ROCm-capable device is detected" / rocminfo `HSA_STATUS_ERROR_OUT_OF_RESOURCES` with the gfx900 override
 
 ```

@@ -422,7 +422,7 @@ the carve-out).
 | **Vulkan GPU** | ON | **73.35 / 159.06 / 153.67** | **21.73 / 21.56 / 20.95** | +13 % prefill, +13 % decode (May: 65.00 / 138.57 / 137.11, 19.06 / 18.95 / 18.47) |
 | Vulkan GPU | OFF | 66.89 / 157.57 / 155.91 | 21.30 / 21.21 / 18.60 | — |
 | **ROCm 7.2 baremetal** | OFF | **47.73 / 94.48 / 88.96** | **18.70 / 17.79 / 14.66** | +24 % prefill, +12 % decode (May: 42.47 / 72.61 / 71.65, 16.67 / 15.85 / 13.03) |
-| ROCm 7.2 baremetal | ON | 43.60 / 67.60 / 41.53 | 18.74 / 17.55 / 14.65 | FA ON hurts prefill, as on every other model |
+| ROCm 7.2 baremetal | ON | 43.60 / 67.60 / 41.53 | 18.74 / 17.55 / 14.65 | FA ON hurts *prefill* on every model. For **decode** this reversed on 2026-09-08 with `patches/0001` — see the FA section at the top |
 | CPU (`-dev none`) | ON | 88.31 / 94.33 / 87.46 | 18.39 / 17.95 / 14.36 | decode +8 %; prefill not comparable (May used `-ngl 0`, which offloads) |
 | CPU (`-dev none`) | OFF | 86.07 / 91.48 / 86.54 | 18.25 / 18.14 / 17.05 | — |
 

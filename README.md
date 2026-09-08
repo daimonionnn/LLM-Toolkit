@@ -282,6 +282,7 @@ bash run/run-rocm7-baremetal.sh /path/to/model.gguf -ngl 99 -c 8192
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common errors, Docker ROCm workaround, diagnostic commands          |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)       | GPU architecture, Vulkan vs ROCm analysis, UMA memory model         |
 | [docs/ROCM-PERF-AUDIT.md](docs/ROCM-PERF-AUDIT.md) | Why ROCm trails Vulkan on this silicon, ranked fixes, experiment plan |
+| [patches/README.md](patches/README.md)             | Local llama.cpp patches — rationale and measurements for each        |
 | [docs/BUILD.md](docs/BUILD.md)                     | Build prerequisites, ROCm build from source, HIP patches            |
 | [docs/HIP57-PATCHES.md](docs/HIP57-PATCHES.md)     | Technical details of HIP 5.7 compatibility patches                  |
 
@@ -304,7 +305,13 @@ amd-vega-rocm-vulkan-llm-toolkit/
 │   ├── bootstrap-host.sh              ← Post-reinstall bootstrap: GRUB GTT, groups, toolchain, Vulkan, Docker, ROCm
 │   └── install-rocm7-host.sh          ← Install ROCm 7.2 on Ubuntu 25.10/26.04 (noble packages)
 │
+├── patches/                           ← Local llama.cpp patches, applied at build time
+│   └── 0001-fattn-tile-gcn-occupancy.patch  ← GCN5 FA occupancy: +141% ROCm decode at 32K
+│
 ├── build/                             ← Dockerfiles & build scripts
+│   ├── llama.cpp-ref                  ← Pinned commit shared by all four build paths
+│   ├── llama-cpp-ref.sh               ← Reads the pin (rejects short SHAs)
+│   ├── apply-patches.sh               ← Applies patches/ after checkout; hard error if one fails
 │   ├── Dockerfile.rocm64              ← ROCm 6.2.4 image (working)
 │   ├── Dockerfile.rocm7-vega          ← ROCm 7.2 image + gfx900 tensile backport
 │   ├── build-llamacpp-rocm-vega.sh    ← ROCm 6 build script (runs inside Docker)
@@ -367,6 +374,12 @@ amd-vega-rocm-vulkan-llm-toolkit/
 - [x] **BIOS retune (2026-09-07)** — UMA carve-out 2 → 16 GB, Curve Optimizer −10 → −15, IOMMU off, iGPU boost +200 MHz, throttle limit 90 → 99 °C. Net on gemma: ROCm +22 % prefill / +12 % decode, Vulkan +5 % decode, CPU ~unchanged; peak temp fell to 86.6 °C. The iGPU boost changed the DPM table but not the observed 2400 MHz clock, and IOMMU off changed nothing measurable
 - [x] **`-fa auto` trap fixed in the ROCm launcher (2026-09-08)** — `run/run-rocm7-baremetal.sh` passed no `-fa`, so it resolved to `auto`, which probes the backend, finds the generic FA tile kernel compiles for gfx900, and enables flash attention. Measured on gemma at a 3330-token prompt: `-fa 0` = 112.8 t/s, `-fa 1` = 48.9, **`-fa auto` = 48.9**. Anyone using the launcher without passing `-fa 0` was silently getting 43 % of achievable prefill. Launcher now defaults to `-fa 0` (still overridable)
 - [x] **Qwen3.5-35B re-benchmarked (2026-09-07)** — 20 GB model loads on ROCm without the documented hard freeze. Vulkan `-fa 1` is the best path (21 t/s decode to 4K, 159 t/s prefill at 1K); both GPU backends beat May 2026 by 12–24 %
+- [x] **Flash attention fixed on gfx900 (2026-09-08)** — the CDNA-shared FA tile config caps GCN5 kernels at 128 VGPRs (CDNA spills into AGPRs, GCN5 has none); 50 of 60 rows spilled, up to 2262 registers. `patches/0001` gives GCN its own occupancy: ROCm decode at 32K **6.16 → 14.87 t/s (+141 %)** on the 35B, **7.61 → 12.31 (+62 %)** on gemma, and the long-context collapse disappears (−22 % from 1K to 32K, matching Vulkan's −21 %). `test-backend-ops` 2959/2959
+- [x] **`-ub 4096` adopted, capped by context (2026-09-08)** — worth +47 % to +85 % prefill on long prompts, but `ctx × ubatch > 2²⁶` hangs the Vulkan compute ring, so the launcher derives `min(4096, 2²⁶/CTX)`
+- [x] **`-ctk q8_0` adopted for long context (2026-09-08)** — +2.7 % at 1K but **+23.5 % at 32K**; June's "+3.5 %, small" was measured only at 4K
+- [x] **Clock pinning dropped (2026-09-08)** — no effect now that the cooling fix stopped the throttling that made it look useful in June
+- [ ] **`v_mad_mix_f32` for the FA KQ MAC** — gfx900 has the instruction (LLVM reports `mad-mix-insts` and emits it), but `V_DOT2_F32_F16_AVAILABLE` is defined only for RDNA2+/gfx906/CDNA, so the KQ loop falls back to ~2.5 VALU ops per MAC instead of 1. Needs `-fgpu-flush-denormals-to-zero`. Likely target for the remaining ~13 % gap to Vulkan
+- [ ] **Send `patches/0001` upstream** — it fixes the whole GCN5 class, not just this box
 - [ ] **Explain ROCm's gain from the BIOS retune** — per-phase sampling shows **ROCm never uses the BIOS carve-out** (VRAM ~300 MB, whole model in GTT) on both gemma and the 35B, so the carve-out cannot be the cause. An earlier commit claimed it was, from a whole-run VRAM peak that actually belonged to the Vulkan phase; corrected in [benchmarks.md](docs/benchmarks.md). The real cause is unidentified — four other settings changed at once
 - [ ] **Repaste the CPU** — peak is 86.6 °C on a 65 W APU. Not throttling, but the throttle limit is now set to 99 °C, above the 95 °C stock Tjmax, so the usual safety margin is gone
 - [ ] **Re-run the remaining backends on 26.04** — Docker ROCm 6.2.4/7.2 images have not been rebuilt or re-verified since the reinstall, and the 35B-A3B model is not downloaded
