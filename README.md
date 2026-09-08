@@ -120,13 +120,13 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 | **Docker ROCm 6.2.4** (`run/run-docker-rocm.sh`) | ROCm 6 comparison path | Self-contained `rocm/dev-ubuntu-24.04:6.2.4` image; last measured May 2026 (40–64 prefill / 12–14 decode on the 35B). Kept for ROCm-6-vs-7 comparison rather than for use |
 | Baremetal HIP 5.7.1 (Ubuntu repo)   | ❌ broken | HIP 5.7.1 + Clang-21 mismatch — segfaults at slot init               |
 
-> **The ROCm numbers here are measured at `-ub 512`, but the launchers ship `-ub 2048`.**
+> **The tables here are measured at `-ub 512`; the launchers now ship `-ub 4096`.**
 > `bench/run-all-benchmarks.sh` passes no `-b`/`-ub`, so it benchmarks llama.cpp's
-> default micro-batch, while `run/run-rocm7-baremetal.sh` and `run/run-docker-rocm7.sh`
-> both set `-b 2048 -ub 2048` — worth about +22 % prefill at 4K on this GPU (measured
-> June 2026). The published ROCm prefill figures are therefore conservative relative to
-> what the launchers actually run. Re-measuring the tables at `-ub 2048` is open work;
-> see [ROCM-PERF-AUDIT.md](docs/ROCM-PERF-AUDIT.md) item 1.
+> default micro-batch. Measured 2026-09-08 with `llama-bench` on the 35B at a
+> 3330-token prompt, going from `-ub 512` to `-ub 4096` is worth **+70 % on ROCm**
+> (84 → 144 t/s) and **+42 % on Vulkan** (139 → 198). Every GPU row below is therefore
+> conservative. Re-baselining the tables is open work — see
+> [benchmarks.md](docs/benchmarks.md#prefill-micro-batch--ub--the-largest-tuning-win-found--2026-09-08).
 
 **Why baremetal broke in June 2026, and why it works again:** the gfx900-on-gfx90c technique needs (a) `HSA_OVERRIDE_GFX_VERSION=9.0.0` and (b) gfx900 rocBLAS tensile kernels. AMD's modular packages (`amdrocm-core` 7.13/7.14), installed for the R9700s, **rejected** the override (`HSA_STATUS_ERROR_OUT_OF_RESOURCES`) and shipped no gfx9 kernels at all — and since llama.cpp's prefill GEMMs go through rocBLAS, even a native gfx90c rebuild could not have worked there. With the dGPUs moved out and classic ROCm 7.2.0 installed from repo.radeon.com, both preconditions hold again: the runtime accepts the override and the ROCm 6.3.4 tensile backport applies cleanly. `run/run-rocm7-baremetal.sh` still preflight-checks all of this and fails early with instructions if a modular-ROCm host reappears.
 

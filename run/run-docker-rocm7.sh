@@ -107,7 +107,7 @@ docker run --rm $TTY_FLAG \
   -m "/models/$MODEL_NAME" \
   -fa 0 \
   -ngl 99 \
-  -b 2048 -ub 2048 \
+  -b 4096 -ub 4096 \
   "$@"
 # -ub 2048 (full-batch prefill): benchmarked ~+22% prefill at 4K ctx on the
 # Vega 8 vs the default -ub 512, no decode cost (docs/benchmarks.md tuning sweep,

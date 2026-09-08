@@ -40,6 +40,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MODEL="${MODEL:-$HOME/.lmstudio/models/lmstudio-community/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf}"
 PORT="${PORT:-8080}"
 CTX="${CTX:-8192}"
+# Prefill micro-batch. Measured 2026-09-08 on the 35B at a 3330-token prompt
+# (llama-bench, cold prefill): ROCm 84 -> 144 t/s and Vulkan 139 -> 198 t/s going
+# from the upstream default of 512 to 4096. The win comes from filling the MoE
+# expert tiles; it costs ~2 GB of extra GTT at -c 8192. Lower it if memory is
+# tight: UBATCH=1024 keeps most of the gain for ~1K prompts.
+BATCH="${BATCH:-4096}"
+UBATCH="${UBATCH:-4096}"
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -83,15 +90,19 @@ case "$MODE" in
             "$MODEL" \
             -ngl 99 -c "$CTX" --port "$PORT" --no-warmup \
             -dev "$VULKAN_DEV" -fa 1 \
+            -b "$BATCH" -ub "$UBATCH" \
             "$@"
         ;;
     --cpu)
         shift
         banner "CPU only (no GPU offload)"
         free_port
+        # -dev none, NOT -ngl 0: upstream changed the -ngl default to auto, and
+        # with a GPU backend present `-ngl 0` still offloads (measured 2026-09-08:
+        # 91% GPU busy, 6.5 GB in GTT). Only -dev none is actually CPU-only.
         exec "$SCRIPT_DIR/run-llamaserver-vulkan.sh" \
             "$MODEL" \
-            -ngl 0 -c "$CTX" --port "$PORT" --no-warmup \
+            -dev none -c "$CTX" --port "$PORT" --no-warmup \
             -fa 1 \
             "$@"
         ;;

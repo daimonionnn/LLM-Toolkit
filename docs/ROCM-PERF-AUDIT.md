@@ -123,7 +123,7 @@ Score = (expected gain × confidence) / effort. "Test" names the exact command.
 
 | # | Change | Expected | Why it should work |
 |---|---|---|---|
-| 1 | **Add `-b 2048 -ub 2048` to the harness ROCm path** (and adopt in docs as the ROCm default) | 35B prefill 4K: 89 → ~105-110 (+18-22 %); 1K +12 %; decode 0 | Fills MMQ's 64-column expert tiles (mechanism a+c). Same delta measured June 2026 on Docker. No stability risk; `-ub 4096` may add +0-5 % more. |
+| 1 | **`-ub 4096`** — DONE 2026-09-08, adopted in all three launchers | **Measured +70 % ROCm prefill at 4K** (84.2 → 143.5 t/s) and **+42 % on Vulkan** (139.1 → 197.9). Estimate above was +18-22 %; the real figure is far larger because the June estimate came from the server harness (warm-KV incremental prefill), which flattens the effect. Optimum is `ubatch ≥ prompt length`. Costs ~2 GB GTT. |
 | 2 | **Pin `-fa 0` in `run/run-rocm7-baremetal.sh`** | **DONE 2026-09-08** — was costing 57 % of prefill | Confirmed by measurement, not inference: gemma, 3330-token prompt, `-fa 0` = 112.78 t/s, `-fa 1` = 48.91, **`-fa auto` = 48.90**. The launcher passed no `-fa`, so every launch through it ran with FA on. Fixed; still overridable. |
 | 3 | **Fix the harness** (warmup request, `cache_prompt:false` or `llama-bench -d`, `-r 3`) | trust, not speed | Section 2. Cheapest change with the largest effect on decision quality. |
 | 4 | `-ctk q8_0` (with `-fa 0`; `-ctv` needs FA) | decode 4K +3-4 % | June: +3.5 % at 4K. Never combined with `-ub 2048`, never on baremetal. |

@@ -2,6 +2,67 @@
 
 Compact benchmark log for llama.cpp on AMD Ryzen 7 5700G / Radeon Vega 8. Latest run is first; older results are kept where they explain behaviour changes.
 
+## Prefill micro-batch (`-ub`) — the largest tuning win found — 2026-09-08
+
+`llama-bench`, cold prefill, Qwen3.5-35B-A3B-Q4_K_M, `-ngl 99 -b 4096 -r 2`.
+ROCm at `-fa 0`, Vulkan at `-fa 1` (each backend's best flash-attention setting).
+
+| `-ub` | ROCm pp937 | ROCm pp3330 | Vulkan pp937 | Vulkan pp3330 |
+| ----- | ---------: | ----------: | -----------: | ------------: |
+| 512 (upstream default) | 84.46 | 84.23 | 145.16 | 139.05 |
+| 1024 | 115.95 | 110.04 | — | — |
+| 2048 | 115.92 | 130.22 | 174.09 | 185.01 |
+| **4096** | 114.98 | **143.54** | 173.92 | **197.88** |
+| **gain at 4K** | | **+70 %** | | **+42 %** |
+
+**The optimum is roughly `ubatch ≥ prompt length.`** A 937-token prompt is saturated at
+`-ub 1024`; a 3330-token prompt keeps improving to 4096. The mechanism is MoE tile fill:
+with 256 experts and 8 active per token, a 512-token ubatch puts ~16 tokens on each
+expert, while MMQ's tiles are 64 columns wide — so three quarters of every tile that is
+fetched from GTT and unpacked into LDS is thrown away. Larger ubatches fill them.
+
+**Cost:** ~2 GB of additional GTT at `-c 8192` (35B: 22.9 GB at `-ub 4096` vs 20.8 GB at
+`-ub 512`). No decode cost. On a 42 GB-free machine this is comfortable; lower `UBATCH`
+if memory is tight, since `-ub 1024` already captures most of the gain for ~1K prompts.
+
+### What this changes about the ROCm-vs-Vulkan gap
+
+| `-ub` | ROCm | Vulkan | ROCm behind by |
+| ----- | ---: | -----: | -------------: |
+| 512 | 84.23 | 139.05 | **39 %** |
+| 2048 | 130.22 | 185.01 | 30 % |
+| 4096 | 143.54 | 197.88 | **27 %** |
+
+Both backends gain, so the gap narrows but does not close. [ROCM-PERF-AUDIT.md](ROCM-PERF-AUDIT.md)
+put the prefill gap at ~40 %; that figure was measured at `-ub 512`. At each backend's
+best setting it is **27 %**, and the audit's explanation for the remainder — emulated
+dp4a on gfx900, 6 VALU instructions per 4 MACs against Vulkan's packed FP16 FMA — still
+stands as the floor.
+
+### Launchers were leaving this on the table
+
+| Launcher | Was | Now |
+| -------- | --- | --- |
+| `run/run-rocm7-baremetal.sh` | `-b 2048 -ub 2048` | `-b 4096 -ub 4096` |
+| `run/run-docker-rocm7.sh` | `-b 2048 -ub 2048` | `-b 4096 -ub 4096` |
+| `run/start-llama-server.sh` (Vulkan — **the default path**) | nothing, i.e. `-ub 512` | `-b 4096 -ub 4096`, tunable via `BATCH=`/`UBATCH=` |
+
+The Vulkan default path set no batch flags at all, so the backend this repo recommends
+was running 42 % below its own capability at 4K context.
+
+### `start-llama-server.sh --cpu` was not CPU-only either
+
+Same `-ngl 0` bug as the benchmark harness: the CPU mode offloaded to the GPU. Now
+`-dev none`, verified — GTT 55 MiB and 0 % GPU busy during a request, against ~6.5 GB
+and 91 % before.
+
+> **The published backend tables above and below still use `-ub 512`**, because that is
+> what the harness passes. They remain internally consistent (every backend measured the
+> same way) but they understate every GPU row, and at `-ub 512` they overstate the
+> ROCm-vs-Vulkan gap. Re-baselining the tables at `-ub 4096` is open work.
+
+---
+
 ## ROCm 7.2 Docker re-verified — 2026-09-08
 
 Image rebuilt from `build/Dockerfile.rocm7-vega` and benchmarked on both models with

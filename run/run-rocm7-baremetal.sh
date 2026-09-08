@@ -165,7 +165,7 @@ exec "$LLAMA_BIN" \
     --host 0.0.0.0 \
     --port 8080 \
     -fa 0 \
-    -b 2048 -ub 2048 \
+    -b 4096 -ub 4096 \
     "$@"
 # All three flags are defaults, not constraints: "$@" comes last, so anything
 # you pass on the command line overrides them.
@@ -180,6 +180,11 @@ exec "$LLAMA_BIN" \
 # Verified the same run: -fa auto = 48.9 t/s, i.e. identical to -fa 1, so
 # leaving -fa unset silently costs 57% of prefill.
 #
-# -ub 2048 (full-batch prefill): ~+22% prefill at 4K ctx on the Vega 8 vs the
-# default -ub 512, no decode cost (docs/benchmarks.md, measured on the Docker
-# path).
+# -ub 4096 (full-batch prefill): the single largest ROCm win found so far.
+# Measured 2026-09-08 with llama-bench on the 35B (cold prefill, -r 2):
+#   3330-token prompt: ub 512 = 84.2 t/s, 1024 = 110.0, 2048 = 130.2, 4096 = 143.5
+#   937-token prompt:  ub 512 = 84.5,     1024 = 116.0, 2048 = 115.9, 4096 = 115.0
+# The optimum is roughly "ubatch >= prompt length": a 256-expert MoE with 8 active
+# experts spreads a 512-token ubatch over ~16 tokens per expert, leaving MMQ's
+# 64-column tiles three-quarters empty. Costs ~2 GB of extra GTT at -c 8192
+# (22.9 vs 20.8 GB on the 35B). No decode cost.
