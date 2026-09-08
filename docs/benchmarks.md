@@ -2,6 +2,62 @@
 
 Compact benchmark log for llama.cpp on AMD Ryzen 7 5700G / Radeon Vega 8. Latest run is first; older results are kept where they explain behaviour changes.
 
+## Long context: the ROCm gap widens sharply — 2026-09-08
+
+`llama-bench -n 32 -d <depth> -ub 512`, decode t/s at KV depth. `-ub 512` because at
+`-fa 0` the KQ intermediate scales as `n_kv × n_ubatch`; at 32k with `-ub 4096` it would
+need 8 GB on its own.
+
+### Qwen3.5-35B-A3B — decode t/s by depth
+
+| Depth | ROCm `-fa 0` | Vulkan `-fa 1` | Vulkan ahead |
+| ----- | -----------: | -------------: | -----------: |
+| 1 024 | 18.22 | 21.69 | +19 % |
+| 4 096 | 15.18 | 21.18 | +40 % |
+| 16 384 | 9.33 | 19.22 | **+106 %** |
+| 32 768 | **6.16** | **17.10** | **+178 %** |
+| *loss 1k → 32k* | *−66 %* | *−21 %* | |
+
+### gemma-4-E4B — decode t/s by depth
+
+| Depth | ROCm `-fa 0` | Vulkan `-fa 1` | Vulkan ahead |
+| ----- | -----------: | -------------: | -----------: |
+| 1 024 | 14.87 | 18.24 | +23 % |
+| 4 096 | 13.56 | 17.62 | +30 % |
+| 16 384 | 10.17 | 15.57 | +53 % |
+| 32 768 | **7.61** | **13.49** | **+77 %** |
+| *loss 1k → 32k* | *−49 %* | *−26 %* | |
+
+**Mechanism.** ROCm cannot use flash attention on gfx900 — the only FA kernel available
+is the generic tile kernel, which collapses prefill (see the FA section below), so `-fa 0`
+is forced. With `-fa 0`, decode attention runs through `mmvf`, which launches one block
+per KV row and does not fold the GQA ratio, so each K head is re-streamed by all 8 of its
+Q heads and the cost grows linearly with `n_kv`. Vulkan's flash-attention path has neither
+term. This is the same mechanism [ROCM-PERF-AUDIT.md](ROCM-PERF-AUDIT.md) identified for
+the 4K falloff; at 32k it dominates.
+
+**At 32k, ROCm decode is not usable** — 6.2 t/s on the 35B, 7.6 on gemma.
+
+### This bounds the dense-model ROCm win
+
+ROCm's prefill advantage on gemma is paid once per prompt; the decode deficit is paid per
+token. For a 3330-token prompt, ROCm saves 2.71 s on prefill (15.97 s vs 18.67 s). How
+many generated tokens before Vulkan has taken that back:
+
+| Decode depth | Vulkan saves | Crossover |
+| ------------ | -----------: | --------: |
+| 1 024 | 12.4 ms/token | **218 tokens** |
+| 4 096 | 17.0 ms/token | **159 tokens** |
+| 16 384 | 34.1 ms/token | **79 tokens** |
+| 32 768 | 57.3 ms/token | **47 tokens** |
+
+So ROCm on a dense model is the right choice only for **short answers to long prompts** —
+classification, extraction, "answer in one sentence" over a big document. For anything
+that generates more than ~150 tokens, or at any context beyond a few thousand, Vulkan wins
+overall despite the slower prefill.
+
+---
+
 ## Current baseline — 2026-09-08, `-ub 4096`
 
 All backends, both models, re-measured after `-ub` was raised from the upstream default

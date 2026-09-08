@@ -46,13 +46,17 @@ attention setting.
 
 | Workload | Use |
 | -------- | --- |
-| Decode, any model, any context | **Vulkan `-fa 1`** — wins everywhere by 13–41 % |
+| Decode, any model, any context | **Vulkan `-fa 1`** — wins everywhere, by 19 % at 1K context and **178 % at 32K** |
+| Long context (≥ 16K) | **Vulkan** — ROCm decode collapses to 6–8 t/s and is not usable |
 | Short prompts (~128 tok) | **Vulkan** — wins by 43–81 % |
 | Long prompts, MoE model | **Vulkan `-fa 1`** — wins by 35 % |
-| Long prompts, dense model | **ROCm `-fa 0`** — wins by 13–17 % |
+| Long prompt + **short** answer, dense model | **ROCm `-fa 0`** — 13–17 % faster prefill, but only up to ~159 generated tokens |
 
-Vulkan remains the right default (`run/start-llama-server.sh` with no flags), but it is
-no longer a clean sweep: on a dense model with long prompts ROCm is measurably faster.
+Vulkan remains the right default (`run/start-llama-server.sh` with no flags). ROCm's one
+win — long-prompt prefill on a dense model — is paid back within ~159 generated tokens at
+4K context and ~47 tokens at 32K, because ROCm decode degrades far faster with context
+(−66 % from 1K to 32K, against Vulkan's −21 %). See
+[benchmarks.md](docs/benchmarks.md#long-context-the-rocm-gap-widens-sharply--2026-09-08).
 
 > **`-fa 1` on ROCm halves prefill** (35B 4K: 53 vs 141). Never use it there. On Vulkan
 > `-fa 1` is best for both metrics.
