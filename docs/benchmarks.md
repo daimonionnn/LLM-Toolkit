@@ -198,27 +198,84 @@ re-measures at each context with the patched build and adds 8192, prefill only
 [`bench/results/2026-09-09-ub-sweep.tsv`](../bench/results/2026-09-09-ub-sweep.tsv)).
 26 cells, 25 completed, **zero ring resets**.
 
-#### `-ub 4096` against the matrix's `-ub 2048`
+#### Prefill by micro-batch, both models, all three values
 
-| Model | Backend | FA | 4K | 16K | 32K |
-| --- | --- | --- | ---: | ---: | ---: |
-| **gemma** | ROCm | `1` | **249.0** (+55 %) | **202.1** (+39 %) | **173.8** (+32 %) |
-| gemma | ROCm | `0` | 205.3 (+34 %) | 177.3 (+28 %) | 149.5 (+23 %) |
-| 35B | ROCm | `1` | 151.9 (+9 %) | 130.1 (+5 %) | 112.6 (+4 %) |
-| 35B | ROCm | `0` | 144.2 (+6 %) | 123.2 (+3 %) | 99.3 (+3 %) |
-| 35B | Vulkan | `1` | 198.4 (+5 %) | 157.9 (+4 %) | crash |
-| 35B | Vulkan | `0` | 191.9 (+2 %) | **144.1 (−8 %)** | crash |
-| gemma | Vulkan | `1` | 177.1 (−1 %) | crash | crash |
-| gemma | Vulkan | `0` | **152.0 (−9 %)** | crash | crash |
+One table per model, `-ub` as a row so each configuration reads vertically.
+`-ub 2048` cells come from the 2026-09-08 matrix, the rest from this sweep; all are
+`-r 1`, and the `-r 3` re-run below reproduced every value it re-measured to within 0.2 %.
 
-**The gain is a property of the model, not the context.** The dense model gains 23–55 %
-at every context and both FA settings; the MoE gains 3–9 %. That is the tile-fill argument
+**gemma-4-E4B-it Q4_K_M — dense, 7.5 B, head dim 512**
+
+| Backend | FA | `-ub` | 4K | 16K | 32K |
+| --- | --- | ---: | ---: | ---: | ---: |
+| ROCm | `1` | 2048 | 160.4 | 145.9 | 131.9 |
+| **ROCm** | **`1`** | **4096** | **249.0** | **202.1** | **173.8** |
+| ROCm | `1` | 8192 | = | 184.8 | 162.9 |
+| ROCm | `0` | 2048 | 153.6 | 138.7 | 121.2 |
+| ROCm | `0` | 4096 | 205.3 | 177.3 | 149.5 |
+| ROCm | `0` | 8192 | = | 146.7 | 127.0 |
+| Vulkan | `1` | 2048 | 179.4 | 155.1 | ☠ |
+| Vulkan | `1` | 4096 | 177.1 | ✗ | ☠ |
+| Vulkan | `0` | 2048 | 166.5 | 150.3 | ☠ |
+| Vulkan | `0` | 4096 | 152.0 | ✗ | ☠ |
+
+**Qwen3.5-35B-A3B Q4_K_M — MoE, 34.7 B total / ~3 B active, head dim 256**
+
+| Backend | FA | `-ub` | 4K | 16K | 32K |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Vulkan | `1` | 2048 | 188.5 | 151.5 | **120.1** |
+| **Vulkan** | **`1`** | **4096** | **198.4** | **157.9** | ☠ |
+| Vulkan | `0` | 2048 | 187.4 | 156.6 | 116.4 |
+| Vulkan | `0` | 4096 | 191.9 | 143.9 | ☠ |
+| ROCm | `1` | 2048 | 139.3 | 123.7 | 107.9 |
+| ROCm | `1` | 4096 | 151.9 | 130.1 | 112.6 |
+| ROCm | `1` | 8192 | = | 129.6 | 109.7 |
+| ROCm | `0` | 2048 | 136.5 | 119.3 | 96.6 |
+| ROCm | `0` | 4096 | 144.2 | 123.2 | 99.3 |
+| ROCm | `0` | 8192 | = | 117.2 | **OOM** |
+
+`=` the micro-batch clamps to the prompt length, so the cell is `-ub 4096` re-run — not
+measured separately. `☠` measured `DeviceLostError`. `✗` not run: above the Vulkan ceiling
+this sweep established, and re-crashing the ring proves nothing new. `OOM` the `-fa 0` KQ
+intermediate needs 16 GiB in one allocation — see below.
+
+#### What the tables say
+
+**ROCm on a dense model is the headline.** gemma at `-ub 4096` runs 249 t/s at 4K, 202 at
+16K and 174 at 32K — against Vulkan's 179 / 155 / crash. ROCm wins that model at every
+context by 30–39 %, and at 32K it is the only backend that runs it at all. Read down the
+ROCm `-fa 1` rows and the whole story is there: +55 % from 2048 to 4096, then a loss at
+8192.
+
+**The gain is a property of the model, not the context.** The dense model gains 23–55 % at
+every context and both FA settings; the MoE gains 3–9 %. That is the tile-fill argument
 reaching its limit: with 8 of 256 experts active, each expert sees `ub × 8/256` tokens, so
 `-ub 2048` already puts 64 columns on each one — exactly MMQ's tile width. Nothing above it
 can help. A dense model has no such cutoff: every token passes through every weight, so
 doubling the micro-batch keeps doubling the columns per weight fetch. The older sweep shows
 the same thing from the other side — on the 35B, `-ub` 512 → 2048 was worth +55 % and
 2048 → 4096 only +10 %.
+
+**`-ub 8192` is a loss everywhere.** Every cell that ran is below its `-ub 4096` neighbour,
+from −0.4 % (35B `-fa 1` at 16K) to −17.3 % (gemma `-fa 0` at 16K), and the losses are
+largest exactly where the KQ intermediate is largest. **`-ub 4096` is the optimum; do not
+raise it.** This closes an open question that expected headroom above 4096 because prefill
+was still climbing there on the 35B — it was climbing at `-fa 0` pre-patch, and the climb
+does not continue.
+
+The one cell that did not run is an ordinary out-of-memory, not a watchdog hang — `dmesg`
+was clean and the backtrace goes `ggml_cuda_pool_leg::alloc` → `ggml_cuda_error` →
+`ggml_abort`. At `-fa 0` the KQ intermediate is materialised as
+`n_kv × n_ubatch × n_head × 4 B`, and the 35B has 16 heads:
+
+```
+32768 × 8192 × 16 × 4 = 17,179,869,184 B = 16 GiB
+```
+
+one contiguous allocation, on top of ~20 GB of weights and the KV cache. At `-ub 4096` the
+same buffer is 8 GiB and the cell runs. This is arithmetic, not a hardware limit: it is the
+`-fa 0` KQ term, which is why `-fa 1` — where KQ is never materialised — completed both
+32K cells at `-ub 8192`.
 
 **Vulkan regresses with `-ub 4096` at `-fa 0` — confirmed at `-r 3`.** Re-measured with
 three repeats (raw data:
@@ -244,35 +301,6 @@ Worth noting for methodology: every `-r 3` value reproduces its `-r 1` counterpa
 within 0.2 %, including all four cells above and both baselines. The single-repeat sweep
 was sound, and this hardware is far more repeatable than the harness's noisier
 server-based measurements suggested.
-
-#### `-ub 8192`: uniformly worse, question closed
-
-| Model | FA | 16K | 32K |
-| --- | --- | ---: | ---: |
-| 35B | `1` | 129.6 (−0.4 %) | 109.7 (−2.6 %) |
-| 35B | `0` | 117.2 (−4.9 %) | **failed to run** |
-| gemma | `1` | 184.8 (−8.6 %) | 162.9 (−6.3 %) |
-| gemma | `0` | 146.7 (−17.3 %) | 127.0 (−15.1 %) |
-
-Percentages against `-ub 4096`. Every cell is a loss, and the losses are largest exactly
-where the KQ intermediate is largest (`-fa 0`, long context). **`-ub 4096` is the optimum;
-do not raise it.**
-
-The one cell that did not run is an ordinary out-of-memory, not a watchdog hang — `dmesg`
-was clean and the backtrace goes `ggml_cuda_pool_leg::alloc` → `ggml_cuda_error` →
-`ggml_abort`. At `-fa 0` the KQ intermediate is materialised as
-`n_kv × n_ubatch × n_head × 4 B`, and the 35B has 16 heads:
-
-```
-32768 × 8192 × 16 × 4 = 17,179,869,184 B = 16 GiB
-```
-
-one contiguous allocation, on top of ~20 GB of weights and the KV cache. At `-ub 4096` the
-same buffer is 8 GiB and the cell runs. This is arithmetic, not a hardware limit: it is the
-`-fa 0` KQ term, which is why `-fa 1` — where KQ is never materialised — completed both
-32K cells at `-ub 8192`. This closes an open question that expected headroom above 4096 because
-prefill was still climbing there on the 35B — it was climbing at `-fa 0` pre-patch, and the
-climb does not continue.
 
 #### ROCm has no ring-hang ceiling anywhere near Vulkan's
 
