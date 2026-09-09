@@ -220,11 +220,30 @@ doubling the micro-batch keeps doubling the columns per weight fetch. The older 
 the same thing from the other side — on the 35B, `-ub` 512 → 2048 was worth +55 % and
 2048 → 4096 only +10 %.
 
-**Vulkan regresses with `-ub 4096` at `-fa 0`.** Two independent cells, different models
-and contexts, both about −8 %, while every `-fa 1` cell is flat or positive. Mechanically
-consistent: without flash attention the KQ intermediate is `n_kv × n_ubatch`, so a larger
-micro-batch doubles it; with `-fa 1` it is never materialised. Two cells at `-r 1` is thin
-evidence for a −8 % effect — it needs a repeat at `-r 3` before it is more than a caution.
+**Vulkan regresses with `-ub 4096` at `-fa 0` — confirmed at `-r 3`.** Re-measured with
+three repeats (raw data:
+[`bench/results/2026-09-09-vulkan-ub-r3.tsv`](../bench/results/2026-09-09-vulkan-ub-r3.tsv)):
+
+| Model | FA | Context | `-ub 2048` | `-ub 4096` | Δ |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 35B | `0` | 16K | 156.39 ± 0.09 | **143.93 ± 0.16** | **−8.0 %** |
+| gemma | `0` | 4K | 166.42 ± 0.02 | **151.98 ± 0.03** | **−8.7 %** |
+| 35B | `1` | 16K | 151.55 ± 0.14 | 157.71 ± 0.02 | +4.1 % |
+| gemma | `1` | 4K | 179.36 ± 0.00 | 176.93 ± 0.17 | −1.4 % |
+
+The standard deviations are under 0.2 t/s, so the 35B's 12.5 t/s gap is roughly 50 σ —
+this is not noise. The mechanism is the one the numbers suggest: change nothing but the
+flash-attention flag and the sign of the effect flips, because without FA the KQ
+intermediate is materialised at `n_kv × n_ubatch` and a larger micro-batch doubles it,
+while with `-fa 1` it never exists.
+
+**This does not affect the default path** — `start-llama-server.sh` passes `-fa 1` on
+Vulkan. It costs 8 % only if you ask for `-fa 0` there, in which case pass `-ub 2048` too.
+
+Worth noting for methodology: every `-r 3` value reproduces its `-r 1` counterpart to
+within 0.2 %, including all four cells above and both baselines. The single-repeat sweep
+was sound, and this hardware is far more repeatable than the harness's noisier
+server-based measurements suggested.
 
 #### `-ub 8192`: uniformly worse, question closed
 

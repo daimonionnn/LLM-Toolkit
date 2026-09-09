@@ -145,6 +145,13 @@ MODE="${1:-}"
 case "$MODE" in
     ""|--vulkan)
         [ -n "$MODE" ] && shift || true
+        # -fa 1 is not just the faster setting here, it also changes how -ub
+        # behaves: measured 2026-09-09 at -r 3, raising -ub from 2048 to 4096
+        # costs Vulkan 8 % at -fa 0 (35B 16K: 156.4 -> 143.9; gemma 4K: 166.4
+        # -> 152.0) but gains or breaks even at -fa 1. Without FA the KQ
+        # intermediate is materialised at n_kv * n_ubatch and a bigger
+        # micro-batch doubles it. If you override this to -fa 0, pass
+        # UBATCH=2048 as well.
         VULKAN_DEV="$(detect_vega_vulkan_dev)"
         banner "Vulkan (Mesa RADV / Vega 8, $VULKAN_DEV)"
         free_port
