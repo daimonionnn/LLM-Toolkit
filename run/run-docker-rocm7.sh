@@ -90,10 +90,20 @@ docker run --rm $TTY_FLAG \
   "$IMAGE_NAME" \
   --host 0.0.0.0 \
   -m "/models/$MODEL_NAME" \
-  -fa 0 \
+  -fa 1 \
   -ngl 99 \
   -b 4096 -ub 4096 \
   "$@"
-# -ub 2048 (full-batch prefill): benchmarked ~+22% prefill at 4K ctx on the
-# Vega 8 vs the default -ub 512, no decode cost (docs/benchmarks.md tuning sweep,
-# 2026-06). Overridable — pass your own -b/-ub after the model to change it.
+# -fa 1 (flash attention ON): correct only because this image now applies
+# patches/0001 at build time (v_mad_mix_f32, which gfx900 has and llama.cpp does
+# not emit for it). Verified in the image on 2026-09-09, gemma decode at depth
+# 16384: -fa 0 = 10.14 t/s, -fa 1 = 13.99 t/s, +38 %. On a stock ROCm build the
+# opposite holds and FA more than halves prefill, so if you rebuild this image
+# without patches/, put this back to -fa 0. Never leave -fa unset: it means
+# -fa auto, whose probe succeeds on gfx900 either way and cannot tell a patched
+# build from a stock one.
+#
+# -ub 4096 (full-batch prefill): the measured optimum. Worth +23-55 % prefill on
+# a dense model and +3-9 % on an MoE against -ub 2048; -ub 8192 is a loss on
+# every cell tested. See docs/benchmarks.md. Overridable — pass your own -b/-ub
+# after the model.

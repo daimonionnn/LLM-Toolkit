@@ -518,10 +518,14 @@ intact.
 | `1` | 48.91 |
 | `auto` | 48.90 |
 
-`run/run-rocm7-baremetal.sh` passed no `-fa` at all. It now passes one explicitly — `-fa 1`,
-because that build carries `patches/0001`; `run/run-docker-rocm7.sh` still passes `-fa 0`,
-because the Dockerfile does not apply the patch. Both remain overridable. The benchmark
-harness was never affected — it always passed an explicit `-fa`.
+`run/run-rocm7-baremetal.sh` passed no `-fa` at all. Both ROCm launchers now pass one
+explicitly, and both pass `-fa 1`: since 2026-09-09 the Dockerfiles apply `patches/`
+at build time through the same `build/apply-patches.sh` the host builds use, so all four
+build paths compile identical sources. Verified in the rebuilt image (gemma decode at
+depth 16384: `-fa 0` = 10.14 t/s, `-fa 1` = 13.99 t/s, +38 %). An image built before that
+date carries no patch and needs `-fa 0`; `docker run --rm --entrypoint bash <image> -c
+'cat /app/.applied-patches.diff'` says which you have. Both remain overridable, and the
+benchmark harness was never affected — it always passed an explicit `-fa`.
 
 > With `patches/0001` the *decode* verdict reverses (`-fa 1` wins everywhere) but the
 > prefill penalty for FA on ROCm is gone rather than reversed: `-fa 1` is now marginally

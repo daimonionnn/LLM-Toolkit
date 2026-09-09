@@ -1,0 +1,7 @@
+# The Dockerfiles need exactly two things from this repo: patches/ and
+# build/apply-patches.sh. Without this file Docker tars and uploads the entire
+# tree as build context — 1.8 GB of it, almost all llm/, which holds the local
+# llama.cpp builds and has nothing to do with the image.
+*
+!patches/
+!build/apply-patches.sh

@@ -91,6 +91,22 @@ RUN git init -q . && \
     git checkout --detach FETCH_HEAD && \
     git rev-parse --short HEAD
 
+# ── Apply this repo's local patches ──────────────────────────────────────────
+# The same patches/ the baremetal and Vulkan builds apply, via the same script,
+# so all four build paths compile identical sources. Without this the image
+# silently lacks patches/0001 (v_mad_mix_f32) and its ROCm launcher has to stay
+# on -fa 0, which costs 157 % of decode at 32k. A patch that does not apply is
+# a hard error -- see build/apply-patches.sh.
+#
+# The layout under /tmp/repo mirrors the repo so apply-patches.sh resolves
+# ../patches relative to its own location, exactly as it does on the host.
+COPY patches/ /tmp/repo/patches/
+COPY build/apply-patches.sh /tmp/repo/build/apply-patches.sh
+RUN bash -c '. /tmp/repo/build/apply-patches.sh' && \
+    git diff --stat && \
+    git diff > /app/.applied-patches.diff
+
+
 # ── Build with HIP targeting gfx900 ──────────────────────────────────────────
 #
 #  ROCm 7 HIP >= 6.1 so no version-check patch needed.

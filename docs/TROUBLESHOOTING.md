@@ -148,7 +148,9 @@ the worst setting for prefill. Measured on gemma at a 3330-token prompt:
 Pass `-fa` explicitly — always, on every ROCm launch. The right value depends on the
 build, and the `auto` probe cannot tell the difference: `-fa 1` on a build carrying
 `patches/0001`, `-fa 0` on a stock one. `run/run-rocm7-baremetal.sh` (patched) defaults to
-`-fa 1`; `run/run-docker-rocm7.sh` (unpatched image) to `-fa 0`.
+`-fa 1`, and so does `run/run-docker-rocm7.sh` — the image applies `patches/` at build
+time as of 2026-09-09. An older image has no patch and needs `-fa 0`; check with
+`docker run --rm --entrypoint bash <image> -c 'cat /app/.applied-patches.diff'`.
 
 
 

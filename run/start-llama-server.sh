@@ -15,10 +15,20 @@
 #   CTX=8192                         — context size (default: 8192)
 #   PORT=8080                        — server port  (default: 8080)
 #
-# Backends at a glance (Vega 8 iGPU, Qwen3.5-35B-A3B-Q4_K_M, May 2026):
-#   Vulkan (Mesa RADV)  — prefill ~50 t/s @ 4K ctx, decode ~20 t/s  ← best decode
-#   CPU only            — prefill ~233 t/s @ 4K ctx, decode ~13 t/s ← best prefill
-#   ROCm 7.2            — prefill ~68 t/s @ 4K ctx, decode ~14 t/s  ← best GPU prefill
+# Backends at a glance (Vega 8 iGPU, 2026-09-09, each at its own best -ub/-fa,
+# prefill / decode t/s at 4K context):
+#   Vulkan (Mesa RADV)  — 35B 198 / 21.2, gemma 179 / 17.3.  Best decode on both
+#                         models at every context, best prefill on MoE  ← default
+#   ROCm 7.2            — 35B 152 / 18.8, gemma 249 / 15.0.  Best prefill on
+#                         DENSE models by 30-39 %, and the only backend that can
+#                         run gemma at 32k context at all
+#   CPU only            — 35B 84 / 16.1, gemma 85 / 13.8.  Fallback: about half
+#                         the GPU prefill rate
+#
+# Backend choice for prefill follows model density; decode is Vulkan's on both.
+# The line that stood here claiming "CPU ~233 t/s, best prefill" was wrong: it
+# came from -ngl 0, which does not disable GPU offload on current llama.cpp, so
+# it was a GPU measurement mislabelled as CPU. See docs/benchmarks.md.
 #
 # Note: ROCm 7.2 baremetal requires gfx900 support on the host. AMD's modular
 # ROCm packages (amdrocm-core 7.13+/gfx120x) break it — the launcher detects
@@ -187,15 +197,16 @@ case "$MODE" in
         shift
         banner "ROCm 7.2 Docker"
         free_port
-        # -fa 0 here but -fa 1 for baremetal below, deliberately: the Dockerfile
-        # builds llama.cpp straight from the pinned ref and does NOT apply
-        # patches/0001, so this image still has the slow gfx900 FA tile kernel
-        # that costs 57% of prefill. Rebuild the image with the patch and this
-        # branch should follow the baremetal one.
+        # -fa 1, same as baremetal: since 2026-09-09 the Dockerfile applies
+        # patches/0001 at build time, so both ROCm paths compile identical
+        # sources. Verified in the rebuilt image, gemma decode at depth 16384:
+        # -fa 0 = 10.14 t/s, -fa 1 = 13.99 t/s. If you are running an image
+        # built before that date, it has no patch and needs -fa 0 -- check with
+        # `docker run --rm --entrypoint bash <image> -c 'cat /app/.applied-patches.diff'`.
         exec "$SCRIPT_DIR/run-docker-rocm7.sh" \
             "$MODEL" \
             -ngl 99 -c "$CTX" --port "$PORT" --no-warmup \
-            -fa 0 \
+            -fa 1 \
             -b "$ROCM_BATCH" -ub "$ROCM_UBATCH" \
             "$@"
         ;;
@@ -222,8 +233,8 @@ case "$MODE" in
         echo "                                        and is the only path that runs gemma"
         echo "                                        at 32k. Needs the gfx900 backport"
         echo "                                        plus patches/0001 on the host"
-        echo "  --rocm-docker   ROCm 7.2 in Docker  — self-contained, but the image lacks"
-        echo "                                        patches/0001, so it stays on -fa 0"
+        echo "  --rocm-docker   ROCm 7.2 in Docker  — same sources as --rocm, self-contained;"
+        echo "                                        the image applies patches/0001 at build time"
         echo ""
         echo "Env vars: MODEL=  CTX=  PORT=  BATCH=  UBATCH="
         echo ""
