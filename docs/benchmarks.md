@@ -4,66 +4,83 @@ Compact benchmark log for llama.cpp on AMD Ryzen 7 5700G / Radeon Vega 8. Latest
 
 ## Flash attention fixed on gfx900 — the long-context collapse is gone — 2026-09-08
 
-A one-field change to the FA tile config removes the anomaly that made ROCm decode
-unusable at long context. Shipped as
-[`patches/0001-fattn-tile-gcn-occupancy.patch`](../patches/README.md).
+One instruction. `patches/0001-ggml-cuda-mad-gfx900-mad-mix.patch` makes the FA KQ
+accumulate use `v_mad_mix_f32`, which gfx900 has and llama.cpp did not emit for it.
 
 ### The bug
 
-`ggml_cuda_fattn_tile_get_config` routes every non-RDNA AMD part to a table shared with
-CDNA. CDNA has 256–512 AGPRs that a kernel can spill into cheaply; **GCN5 has none** — a
-SIMD holds 256 VGPRs and nothing else. The table's `occupancy = 2` therefore caps every
-kernel at 128 VGPRs and the rest goes to scratch memory.
+`V_DOT2_F32_F16_AVAILABLE` (`common.cuh:760`) is defined only for RDNA2+, gfx906 and
+CDNA. On GCN5 `ggml_cuda_mad(float&, half2, half2)` therefore falls back to
+`__half22float2(v*u); acc += tmp.x + tmp.y` — `v_pk_mul_f16` + 2× `v_cvt_f32_f16` +
+2× `v_add_f32`, **5 VALU ops per 2 MACs**, with the product formed in fp16.
 
-Measured on gfx900 with `-Rpass-analysis=kernel-resource-usage`: **50 of 60 table rows
-spill**, up to 2262 VGPRs and 2.9 KB/lane of scratch. The shapes our models use:
+Those intermediates also cost registers. Measured with
+`-Rpass-analysis=kernel-resource-usage`: the FA tile kernels sat at the 128-VGPR cap,
+**50 of 60 config rows spilling**, up to 2262 VGPRs and 2.9 KB/lane of scratch.
 
-| Kernel | Used by | VGPR | Spill @ occ 2 | Spill @ occ 1 |
-| ------ | ------- | ---: | ------------: | ------------: |
-| `<256,256,1,8>` | Qwen 35B decode | 128 → 256 | 259 | **26** |
-| `<256,256,4,8>` | Qwen 35B prefill | 128 → 256 | 633 | **233** |
-| `<512,512,·,·>` | gemma | 128 → 256 | up to 2262 | — |
-
-Total spills across the 256×256 rows: 10 598 → 4 331.
+gfx900 has the VOP3P mad-mix family — f16 × f16 + f32 in one instruction, product in
+fp32. Two ops with `op_sel` cover a half2: **1 VALU op per MAC**.
 
 ### The effect
+
+| Metric | Before | After |
+| ------ | -----: | ----: |
+| VALU ops per MAC | 2.5 | **1** |
+| Spills, 256×256 FA rows | 10 598 | **6** |
+| VGPR use | 128 (capped) | 76–130 |
+| Best occupancy reached | 2 | **3** |
+| Error vs fp64 on 256 random pairs | 6.1e-3 | **1.4e-6** |
 
 Decode t/s at KV depth, `llama-bench -n 32 -d -ub 512`:
 
 | Model | Depth | `-fa 0` (was best) | `-fa 1` before | `-fa 1` **after** | vs. best before |
 | ----- | ----- | -----------------: | -------------: | ----------------: | --------------: |
-| Qwen 35B | 1 024 | 18.11 | — | **19.04** | +5 % |
-| Qwen 35B | 4 096 | 15.12 | 14.95 | **18.54** | +23 % |
-| Qwen 35B | 16 384 | 9.31 | — | **16.75** | +80 % |
-| Qwen 35B | 32 768 | 6.16 | *timed out* | **14.87** | **+141 %** |
+| Qwen 35B | 4 096 | 15.12 | 14.95 | **18.68** | +24 % |
+| Qwen 35B | 32 768 | 6.16 | *timed out* | **15.86** | **+157 %** |
 | gemma | 4 096 | 13.56 | 13.08 | **15.44** | +14 % |
-| gemma | 32 768 | 7.61 | 5.97 | **12.31** | **+62 %** |
+| gemma | 32 768 | 7.61 | 5.97 | **12.49** | **+64 %** |
 
-Prefill also improves, though `-fa 0` still wins there: 35B at 3330 tokens goes
-51.26 → 71.63 with FA on, against 84.23 without.
+Prefill improves too, though `-fa 0` still wins there.
 
 ### What this changes
 
-**`-fa 1` is now the right setting for ROCm decode.** Every table and every launcher note
-in this repo said the opposite, correctly, until this patch.
+**`-fa 1` is now the right setting for ROCm decode.** Every table and launcher note in
+this repo said the opposite, correctly, until this patch.
 
 **The long-context collapse is gone.** ROCm decode fell 66 % from 1K to 32K; it now falls
-22 %. Vulkan falls 21 % — the curves match. The gap to Vulkan at 32K drops from 178 % to
-13 %.
+about as much as Vulkan's 21 %. The gap to Vulkan at 32K drops from 178 % to **8 %**.
 
-The remaining ~13 % is consistent with the audit's diagnosis: emulated dp4a on the
-quantized GEMMs, which this patch does not touch. The other half of that fix —
-`v_mad_mix_f32` for the KQ MAC, which gfx900 supports and llama.cpp does not emit — is
-still open.
+### The first attempt fixed the symptom
+
+Before finding the instruction, the spill data pointed at the FA tile *occupancy*: the
+config table is shared with CDNA, which has AGPRs to spill into and GCN5 does not, so
+`occupancy = 2` caps every kernel at 128 VGPRs. Giving GCN `occupancy = 1` lifted the cap
+to 256 and took 35B decode at 32K from 6.16 to 14.85 — a real improvement with a correctly
+identified mechanism.
+
+But the kernels were short of registers only because the fp16 fallback materialised
+intermediates that need not exist. Removing them dropped VGPR use below the cap by itself.
+Head to head at 32K on the 35B:
+
+| | t/s |
+| --- | ---: |
+| occupancy only | 14.85 |
+| **mad-mix only** | **15.86 ± 0.02** |
+| both | 15.41 |
+
+Occupancy 1 *on top of* mad-mix is a net loss — it pulls kernels that now reach occupancy
+3 back down to 1. The occupancy patch was dropped. Had the instruction been found first,
+it would never have been written; the audit listed it first and this work did it second,
+because spill data from a diagnostic build was already in hand.
 
 ### Validation
 
-- `test-backend-ops test -o FLASH_ATTN_EXT -b ROCm0`: **2959/2959 passed**, both before
-  and after the patch was rewritten to be GCN-specific.
-- `-fa 0` numbers are unchanged to two decimals (gemma 13.56 / 7.60 before and after),
-  confirming nothing outside the FA path moved.
-- Only the 256×256 and 512×512 shapes were benchmarked. The mechanism applies to all 50
-  spilling rows, but the rest are untested.
+- `test-backend-ops test -o FLASH_ATTN_EXT -b ROCm0`: **2959/2959 passed**, on the shipped
+  configuration and on both superseded variants.
+- Numerics checked against an fp64 reference on the GPU before the patch was written.
+- `-fa 0` numbers are unchanged, confirming nothing outside the FA path moved.
+- Untested: FA shapes other than 256×256 and 512×512, and non-FA callers of
+  `ggml_cuda_mad(float&, half2, half2)`.
 
 ---
 

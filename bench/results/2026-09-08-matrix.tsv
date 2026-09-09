@@ -1,0 +1,75 @@
+# Full benchmark matrix, 2026-09-08/09. llama-bench, -ngl 99 -ub 2048 -b 2048 -r 1.
+# ROCm build carries patches/0001 (v_mad_mix_f32). Cooled below 55 C between runs.
+# gemma/Vulkan rows are MISSING: that configuration hung the GPU compute ring
+# twice (ring comp_1.1.1 and comp_1.0.1 timeouts, both recovered by ring reset)
+# and a third attempt froze the machine. See docs/TROUBLESHOOTING.md.
+# gemma/CPU/decode was still running when the machine froze.
+model	backend	fa	metric	context	t_per_s
+35B	ROCm	0	prefill	4096	136.47
+35B	ROCm	0	prefill	16384	119.31
+35B	ROCm	0	prefill	32768	96.63
+35B	ROCm	1	prefill	4096	139.26
+35B	ROCm	1	prefill	16384	123.69
+35B	ROCm	1	prefill	32768	107.92
+35B	ROCm	0	decode	4096	15.17
+35B	ROCm	0	decode	16384	9.35
+35B	ROCm	0	decode	32768	5.94
+35B	ROCm	1	decode	4096	18.82
+35B	ROCm	1	decode	16384	17.45
+35B	ROCm	1	decode	32768	15.91
+35B	Vulkan	0	prefill	4096	187.38
+35B	Vulkan	0	prefill	16384	156.56
+35B	Vulkan	0	prefill	32768	116.40
+35B	Vulkan	1	prefill	4096	188.47
+35B	Vulkan	1	prefill	16384	151.46
+35B	Vulkan	1	prefill	32768	120.09
+35B	Vulkan	0	decode	4096	18.95
+35B	Vulkan	0	decode	16384	13.51
+35B	Vulkan	0	decode	32768	9.72
+35B	Vulkan	1	decode	4096	21.21
+35B	Vulkan	1	decode	16384	19.23
+35B	Vulkan	1	decode	32768	17.13
+35B	CPU	0	prefill	4096	83.86
+35B	CPU	0	prefill	16384	71.67
+35B	CPU	0	prefill	32768	59.68
+35B	CPU	1	prefill	4096	85.07
+35B	CPU	1	prefill	16384	71.09
+35B	CPU	1	prefill	32768	58.29
+35B	CPU	0	decode	4096	16.13
+35B	CPU	0	decode	16384	13.46
+35B	CPU	0	decode	32768	11.08
+35B	CPU	1	decode	4096	15.29
+35B	CPU	1	decode	16384	8.14
+35B	CPU	1	decode	32768	4.31
+gemma	ROCm	0	prefill	4096	153.61
+gemma	ROCm	0	prefill	16384	138.72
+gemma	ROCm	0	prefill	32768	121.16
+gemma	ROCm	1	prefill	4096	160.35
+gemma	ROCm	1	prefill	16384	145.90
+gemma	ROCm	1	prefill	32768	131.93
+gemma	ROCm	0	decode	4096	12.04
+gemma	ROCm	0	decode	16384	9.28
+gemma	ROCm	0	decode	32768	7.08
+gemma	ROCm	1	decode	4096	14.96
+gemma	ROCm	1	decode	16384	13.59
+gemma	ROCm	1	decode	32768	12.15
+gemma	CPU	0	prefill	4096	84.89
+gemma	CPU	0	prefill	16384	77.28
+gemma	CPU	0	prefill	32768	69.05
+gemma	CPU	1	prefill	4096	89.40
+gemma	CPU	1	prefill	16384	78.02
+gemma	CPU	1	prefill	32768	67.08
+gemma	Vulkan	0	prefill	4096	166.45
+gemma	Vulkan	0	prefill	16384	150.25
+gemma	Vulkan	1	prefill	4096	179.37
+gemma	Vulkan	1	prefill	16384	155.10
+gemma	Vulkan	0	decode	4096	15.04
+gemma	Vulkan	0	decode	16384	12.04
+gemma	Vulkan	1	decode	4096	17.32
+gemma	Vulkan	1	decode	16384	15.29
+gemma	CPU	0	decode	4096	13.78
+gemma	CPU	0	decode	16384	11.41
+gemma	CPU	0	decode	32768	9.71
+gemma	CPU	1	decode	4096	12.55
+gemma	CPU	1	decode	16384	7.94
+gemma	CPU	1	decode	32768	5.29

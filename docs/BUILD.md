@@ -79,8 +79,9 @@ SHA — `git fetch --depth 1 origin <short-sha>` fails with "couldn't find remot
 a script that ignores that silently compiles whatever the checkout already had.
 
 After checkout, `build/apply-patches.sh` applies everything in
-[`patches/`](../patches/README.md) in filename order. Currently one patch, which gives
-GCN5 its own flash-attention occupancy and is worth +141 % ROCm decode at 32K context.
+[`patches/`](../patches/README.md) in filename order. Currently one patch, which makes the
+flash-attention KQ accumulate use `v_mad_mix_f32` on gfx900 and is worth +157 % ROCm
+decode at 32K context.
 **A patch that no longer applies is a hard error**, not a warning: it means the pin moved
 and the patch needs re-validating, and building without it would quietly undo a measured
 improvement.

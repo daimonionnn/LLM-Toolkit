@@ -42,7 +42,7 @@ Qwen3.5-35B-A3B Q4_K_M, `-ngl 99 -c 8192`, prefill / decode t/s at ~128 / ~1K / 
 |---------|---------|--------|-------|
 | **Vulkan `-fa 1`** | **63 / 165 / 190** | **21 / 21 / 21** | Best overall for this model |
 | ROCm 7.2 `-fa 0` | 44 / 122 / 141 | 19 / 18 / 15 | Best ROCm *prefill* setting |
-| ROCm 7.2 `-fa 1` + FA patch | 45 / 76 / 53 | **19 / 19 / 19** | Best ROCm *decode* setting — see below |
+| ROCm 7.2 `-fa 1` + FA patch | 45 / 76 / 53 | **19 / 19 / 16** | Best ROCm *decode* setting — see below |
 | CPU (`-dev none`) | 84 / 91 / 86 | 18 / 18 / 15 | Genuinely CPU-only; `-ngl 0` is **not** |
 
 gemma-4-E4B-it Q4_K_M (dense) at ~4K prompt: **ROCm `-fa 0` 192 t/s beats Vulkan's 170**.
@@ -58,12 +58,12 @@ t/s at KV depth, 35B:
 | 1 024 | 18.11 | 19.04 | 21.69 |
 | 4 096 | 15.12 | 18.54 | 21.18 |
 | 16 384 | 9.31 | 16.75 | 19.22 |
-| 32 768 | 6.16 | **14.87** | 17.10 |
+| 32 768 | 6.16 | **15.86** | 17.10 |
 
 Without the FA patch ROCm decode collapses (−66 % from 1K to 32K) because `-fa 0` forces
 attention through `mmvf`, which launches one block per KV row and does not fold the GQA
-ratio. With it, ROCm falls 22 % and Vulkan 21 % — the curves match, and the gap at 32K
-drops from 178 % to 13 %. See [patches/README.md](../patches/README.md).
+ratio. With it the curves match Vulkan's and the gap at 32K drops from 178 % to **8 %**.
+See [patches/README.md](../patches/README.md).
 
 > **Two settings that are not what they look like.** `-ngl 0` no longer forces CPU-only
 > execution (use `-dev none`), and `-fa auto` resolves to *on* for ROCm, which is the wrong
@@ -103,11 +103,12 @@ The ISA (instruction set architecture) is identical between gfx900 and gfx90c. C
 Two hardware facts bound what any amount of build/flag tuning can achieve on this iGPU:
 
 1. **No hardware `dp4a`.** The byte-wise integer dot-product instruction that llama.cpp's quantized matmul (MMQ) kernels depend on first appears on **Vega 20 / gfx906** (`ggml/src/ggml-cuda/common.cuh` — "VEGA20 … minimum for dp4a"). gfx900/gfx90c lacks it, so MMQ runs through a **software-emulated** dp4a: `common.cuh:717-730` emits 4× `v_mul_i32_i24` (SDWA byte selects) + 2× `v_add3_u32`, i.e. **6 VALU instructions per 4 MACs** (an earlier revision of this file said "≈3 instructions per op" — that was wrong). llama.cpp reacts to this with an explicit rule at `mmq.cu:378-383`: on Vega, MMQ is used **only for MoE experts**, while dense matmuls go to rocBLAS/Tensile (dequantize → FP16 GEMM) using the gfx900 kernels backported from ROCm 6.3.4. This is the dominant reason ROCm trails Vulkan on prefill: RADV's shaders do the same work with packed FP16 FMA at 2 MACs per instruction.
-2. **Flash attention was unusable — now fixed by a local patch.** The FA tile config
-   shared with CDNA caps gfx900 kernels at 128 VGPRs (CDNA spills into AGPRs, GCN5 has
-   none), so 50 of 60 table rows spilled, up to 2262 registers. `patches/0001` gives GCN
-   its own occupancy; ROCm decode at 32K went 6.16 → 14.87 t/s. This removed what used to
-   be the largest ROCm deficit.
+2. **Flash attention was unusable — now fixed by a local patch.** `V_DOT2_F32_F16_AVAILABLE`
+   excludes GCN5, so the FA KQ accumulate fell back to 5 VALU ops per 2 MACs with the
+   product formed in fp16, and its intermediates pushed 50 of 60 config rows into spilling
+   (up to 2262 VGPRs). gfx900 does have `v_mad_mix_f32` — one op per MAC, product in fp32.
+   `patches/0001` uses it: spills 10 598 → 6, ROCm decode at 32K 6.16 → 15.86 t/s. This
+   removed what used to be the largest ROCm deficit.
 3. **Shared DDR4 bandwidth (~40–50 GB/s).** Decode reads the active weights once per token, so token rate is bandwidth-bound, not compute-bound. For the 35B-A3B MoE (~3B active params at Q4 ≈ 1.5–1.7 GB/token) the theoretical ceiling is ~25–30 t/s; measured ROCm decode is 12–15 t/s and Vulkan/RADV reaches 19–20 t/s on the *same* silicon — so ROCm's decode kernels, not the memory wall, are the limiter, and **Vulkan remains the better decode backend**.
 
 What this means for tuning the ROCm 7 build:
@@ -117,7 +118,7 @@ What this means for tuning the ROCm 7 build:
 | `-ub` / `-b` ubatch/batch size | runtime | **The largest single knob.** 512 → 4096 is worth +47 % to +85 % prefill on long prompts. Cap it by context: `ctx × ubatch > 2²⁶` hangs the Vulkan compute ring |
 | `-ctk q8_0` (K-cache quant) | runtime | **Scales with context**: +2.7 % at 1K, +23.5 % at 32K. `-ctv q8_0` needs flash attention, which is usable on ROCm only with the local FA patch |
 | `-fa 1` | runtime | **With the FA patch: best ROCm decode setting** (+141 % at 32K). Without it, or for prefill, use `-fa 0` |
-| FA tile occupancy for GCN | patch | `patches/0001` — the CDNA-shared config caps gfx900 kernels at 128 VGPRs and spills; 50 of 60 table rows affected |
+| `v_mad_mix_f32` for the FA KQ MAC | patch | `patches/0001` — 1 VALU op per MAC instead of 2.5, product in fp32; removes the spilling that came with the old path's intermediates |
 | `rocm-smi --setperflevel high` | runtime | **No effect since the cooling fix.** June measured +3 % on a throttling GPU; SCLK now holds 2400 MHz unaided |
 | `GGML_CUDA_FORCE_MMQ=ON` | build | **Cannot affect decode.** Decode (batch ≤ 8) is served by MMVQ, chosen before `ggml_cuda_should_use_mmq` is consulted; the flag only moves *dense prefill* GEMMs onto emulated dp4a. Measured a wash on the 35B in June 2026 — expected, since its experts were already on MMQ |
 | `GGML_CUDA_F16` | build | **Gone** — no longer a CMake option; FP16 paths are auto-selected by arch (gfx900 has fast packed FP16) |

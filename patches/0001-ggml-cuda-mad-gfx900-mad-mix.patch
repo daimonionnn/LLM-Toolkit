@@ -1,0 +1,28 @@
+diff --git a/ggml/src/ggml-cuda/common.cuh b/ggml/src/ggml-cuda/common.cuh
+index ed0ea60..531e858 100644
+--- a/ggml/src/ggml-cuda/common.cuh
++++ b/ggml/src/ggml-cuda/common.cuh
+@@ -764,6 +764,23 @@ static __device__ __forceinline__ void ggml_cuda_mad(float & acc, const float2 v
+ static __device__ __forceinline__ void ggml_cuda_mad(float & acc, const half2 v, const half2 u) {
+ #ifdef V_DOT2_F32_F16_AVAILABLE
+     asm volatile("v_dot2_f32_f16 %0, %1, %2, %0" : "+v"(acc) : "v"(v), "v"(u));
++#elif defined(__gfx900__)
++    // gfx900/gfx90c has no v_dot2_f32_f16, but it does have the VOP3P mad-mix
++    // family (LLVM feature "mad-mix-insts"): f16 * f16 + f32 in one instruction,
++    // with the product computed in fp32. op_sel picks which half of each source
++    // operand is used, so two ops cover the half2.
++    //
++    // The FAST_FP16 fallback below needs five VALU ops for the same two MACs
++    // (v_pk_mul_f16 + 2x v_cvt_f32_f16 + 2x v_add_f32) and forms the product in
++    // fp16. Measured on 256 random half2 pairs against an fp64 reference:
++    // fallback error 6.1e-3, mad-mix error 1.4e-6.
++    //
++    // Written as inline asm rather than plain C: the compiler only selects
++    // mad-mix from a mul+add expression when both -fgpu-flush-denormals-to-zero
++    // and -ffp-contract=off are set, and those are global flags that would
++    // change every other kernel too.
++    asm volatile("v_mad_mix_f32 %0, %1, %2, %0 op_sel:[0,0,0] op_sel_hi:[1,1,0]" : "+v"(acc) : "v"(v), "v"(u));
++    asm volatile("v_mad_mix_f32 %0, %1, %2, %0 op_sel:[1,1,0] op_sel_hi:[1,1,0]" : "+v"(acc) : "v"(v), "v"(u));
+ #else
+ #ifdef FAST_FP16_AVAILABLE
+     const float2 tmp = __half22float2(v*u);
