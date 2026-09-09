@@ -50,19 +50,13 @@ done
 
 # ─── Locate sensors ──────────────────────────────────────────────────────────
 
-# Vega 8 by PCI device ID, same convention as the run/ and bench/ scripts.
-GPU_DEV=""
-for d in /sys/class/drm/card*/device; do
-    [ "$(cat "$d/device" 2>/dev/null)" = "0x1638" ] && GPU_DEV="$d" && break
-done
-[ -z "$GPU_DEV" ] && echo "⚠  Vega 8 (PCI 0x1638) not found — GPU columns will be empty" >&2
-
+# Vega 8 by PCI device ID, via the shared helper so every script agrees.
 # The GPU's own hwmon, not a global name match: with a dGPU present there is
 # more than one 'amdgpu' hwmon and the numbering is arbitrary.
-GPU_HWMON=""
-if [ -n "$GPU_DEV" ]; then
-    GPU_HWMON=$(ls -d "$GPU_DEV"/hwmon/hwmon* 2>/dev/null | head -1 || true)
-fi
+. "$(cd "$(dirname "$0")" && pwd)/../lib/vega8.sh"
+GPU_DEV="$(vega8_device_dir || true)"
+GPU_HWMON="$(vega8_hwmon_dir || true)"
+[ -z "$GPU_DEV" ] && echo "⚠  Vega 8 (PCI $VEGA8_PCI_ID) not found — GPU columns will be empty" >&2
 
 # CPU package temp — k10temp exposes Tctl, which on Cezanne (5700G) is the real
 # die temperature with no offset. Tjmax is 95 °C.

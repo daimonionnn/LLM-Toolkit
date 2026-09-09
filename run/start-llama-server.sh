@@ -29,6 +29,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/../lib/vega8.sh"
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -127,11 +128,8 @@ free_port() {
 # The Vega 8 shows up as "RADV RENOIR" in llama.cpp's Vulkan device list.
 # Its index can shift when discrete GPUs are added/removed, so detect it.
 detect_vega_vulkan_dev() {
-    local dev
-    dev=$(LD_LIBRARY_PATH="$SCRIPT_DIR/../llm/vulkan/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-        "$SCRIPT_DIR/../llm/vulkan/bin/llama-server" --list-devices 2>/dev/null \
-        | awk -F: '/RENOIR/ { gsub(/^[ \t]+/, "", $1); print $1; exit }') || true
-    echo "${dev:-Vulkan0}"
+    LD_LIBRARY_PATH="$SCRIPT_DIR/../llm/vulkan/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        vega8_vulkan_dev "$SCRIPT_DIR/../llm/vulkan/bin/llama-server"
 }
 
 banner() {

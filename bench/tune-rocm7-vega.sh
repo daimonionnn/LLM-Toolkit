@@ -53,21 +53,18 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then echo "✗ docker image 
 MODEL_DIR="$(dirname "$MODEL")"
 MODEL_NAME="$(basename "$MODEL")"
 
-# ── Detect Vega 8 render node + card (by PCI device ID 0x1638) ───────────────
-VEGA8_RENDER_NODE=""
-VEGA8_CARD=""
-for node in /sys/class/drm/renderD*/device; do
-    [ "$(cat "$node/device" 2>/dev/null)" = "0x1638" ] && VEGA8_RENDER_NODE="/dev/dri/$(basename "$(dirname "$node")")"
-done
-for c in /sys/class/drm/card*/device; do
-    [ "$(cat "$c/device" 2>/dev/null)" = "0x1638" ] && VEGA8_CARD="$(basename "$(dirname "$c")")"
-done
-# Fallback only — the PCI-ID scan above is authoritative. This constant has been
-# renderD129, then renderD130 (2× R9700 installed), and is renderD128 now that the
-# Vega 8 is the only GPU; do not trust it, override with VEGA8_RENDER_NODE.
+# ── Detect Vega 8 render node + card ─────────────────────────────────────────
+# Detection lives in lib/vega8.sh so every script in this repo agrees. Both the
+# render node and the card number move when GPUs are added or removed — this box
+# has been renderD129, renderD130 and now renderD128 — so neither is hardcoded.
+# Override with VEGA8_RENDER_NODE / VEGA8_CARD_DIR.
+. "$SCRIPT_DIR/../lib/vega8.sh"
+VEGA8_RENDER_NODE="$(vega8_render_node || true)"
+VEGA8_CARD_PATH="$(vega8_card_dir || true)"
+VEGA8_CARD="$(basename "${VEGA8_CARD_PATH:-unknown}")"
 : "${VEGA8_RENDER_NODE:=/dev/dri/renderD128}"
-echo "Vega 8 render node: $VEGA8_RENDER_NODE   card: ${VEGA8_CARD:-unknown}"
-PERF_PATH="/sys/class/drm/$VEGA8_CARD/device/power_dpm_force_performance_level"
+echo "Vega 8 render node: $VEGA8_RENDER_NODE   card: $VEGA8_CARD"
+PERF_PATH="${VEGA8_CARD_PATH:-/sys/class/drm/$VEGA8_CARD}/device/power_dpm_force_performance_level"
 
 set_perf() {  # $1 = auto|high ; returns non-zero if it could not change the level
     [ -z "$VEGA8_CARD" ] && return 1

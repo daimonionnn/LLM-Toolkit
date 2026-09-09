@@ -15,6 +15,7 @@
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/../lib/vega8.sh"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # =============================================================================
@@ -259,16 +260,14 @@ start_vulkan_gpu() {
     pkill -f "llama-server.*port $SERVER_PORT" 2>/dev/null || true
     sleep 1
 
-    # TODO: -dev Vulkan0 is hardcoded; auto-detect the RADV RENOIR index like
-    #       run/start-llama-server.sh does — the device order shifts whenever
-    #       discrete GPUs are added/removed.
+    local vk_dev; vk_dev="$(_detect_vega8_vulkan_dev)"
 
     LD_LIBRARY_PATH="$REPO_DIR/llm/vulkan/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
         "$REPO_DIR/llm/vulkan/bin/llama-server" \
         -m "$CURRENT_MODEL" \
         $fa_flag \
         -ngl 99 \
-        -dev Vulkan0 \
+        -dev "$vk_dev" \
         -b "$BENCH_BATCH" -ub "$BENCH_UBATCH" \
         -c "$CONTEXT_SIZE" \
         --host 0.0.0.0 \
@@ -310,48 +309,13 @@ start_cpu() {
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 # =============================================================================
 
-_detect_vega8_render_node() {
-    local pci_id="0x1638"
-    for node in /sys/class/drm/renderD*/device; do
-        local dev_id
-        dev_id="$(cat "$node/device" 2>/dev/null || true)"
-        if [[ "$dev_id" == "$pci_id" ]]; then
-            echo "/dev/dri/$(basename "$(dirname "$node")")"
-            return 0
-        fi
-    done
-    # Fallback: known Vega 8 node on this machine (September 2026, single GPU).
-    # This value has changed three times; the PCI-ID scan above is what to rely on.
-    echo "/dev/dri/renderD128"
-}
-
-# 0-based GPU index of the Vega 8 in rocminfo agent order (= ROCR index).
-# rocminfo prints each agent's "Name: gfxXXX" before its "Device Type: GPU".
-_detect_vega8_rocm_index() {
-    if [[ -n "${VEGA8_ROCM_DEVICE:-}" ]]; then
-        echo "$VEGA8_ROCM_DEVICE"
-        return
-    fi
-    local rocminfo_bin="/opt/rocm/bin/rocminfo"
-    [[ -x "$rocminfo_bin" ]] || rocminfo_bin="$(command -v rocminfo || true)"
-    if [[ -z "$rocminfo_bin" ]]; then
-        echo "0"
-        return
-    fi
-    "$rocminfo_bin" 2>/dev/null | awk '
-        $1 == "Name:" && $2 ~ /^gfx/  { name = $2 }
-        /Device Type:[[:space:]]+GPU/ {
-            # print gpu+0, not gpu: when the Vega 8 is the first GPU its index
-            # is 0 and `gpu` was never assigned, so bare `print gpu` emits an
-            # EMPTY string. That becomes ROCR_VISIBLE_DEVICES="", which hides
-            # every GPU and silently falls back to CPU ("no usable GPU found").
-            # Masked until September 2026, when the dGPUs left and the Vega
-            # became index 0 for the first time.
-            if (name ~ /^gfx90[029c]$/) { print gpu+0; found = 1; exit }
-            gpu++
-        }
-        END { if (!found) print 0 }
-    '
+# Detection lives in lib/vega8.sh so every script in this repo agrees; these are
+# thin aliases kept so the call sites below read unchanged.
+_detect_vega8_render_node() { vega8_render_node || echo "/dev/dri/renderD128"; }
+_detect_vega8_rocm_index()  { vega8_rocm_index; }
+_detect_vega8_vulkan_dev()  {
+    LD_LIBRARY_PATH="$REPO_DIR/llm/vulkan/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        vega8_vulkan_dev "$REPO_DIR/llm/vulkan/bin/llama-server"
 }
 
 wait_for_server() {

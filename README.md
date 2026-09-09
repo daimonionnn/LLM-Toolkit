@@ -305,6 +305,8 @@ bash run/run-rocm7-baremetal.sh /path/to/model.gguf -ngl 99 -c 8192
 amd-vega-rocm-vulkan-llm-toolkit/
 ├── README.md
 ├── LICENSE                             ← MIT
+├── lib/
+│   └── vega8.sh                       ← Shared Vega 8 detection (render node, ROCm index, hwmon, Vulkan dev)
 ├── run/
 │   ├── start-llama-server.sh          ← Main launcher (ROCm 7.2 baremetal default)
 │   ├── run-docker-rocm.sh             ← Docker ROCm 6.2.4 launcher (working, auto-selects Vega 8)
@@ -401,7 +403,7 @@ amd-vega-rocm-vulkan-llm-toolkit/
 - [ ] **Re-run the remaining backends on 26.04** — Docker ROCm 6.2.4/7.2 images have not been rebuilt or re-verified since the reinstall, and the 35B-A3B model is not downloaded
 - [ ] **ROCm 7.2 / Vega 8 tuning sweep (in progress, June 2026):** baseline 35B → `-ub`/`-b` batch sizes → `-ctk q8_0` K-cache quant → `rocm-smi --setperflevel high` → maybe `-DGGML_CUDA_FORCE_MMQ=ON`. Harness: `bench/tune-rocm7-vega.sh`. Ceiling analysis (no hardware dp4a, DDR4 bandwidth-bound) in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/benchmarks.md](docs/benchmarks.md)
 - [ ] Document `numactl --membind=0 llama-server` usage for NUMA-sensitive workloads
-- [ ] Extract the copy-pasted Vega 8 detection (PCI-ID render node + rocminfo agent index) into one shared, sourced helper — currently duplicated across `run/` and `bench/` scripts
+- [x] **Vega 8 detection extracted into `lib/vega8.sh` (2026-09-09)** — the PCI-ID render node, the rocminfo agent index, the card/hwmon directories, the PCI address and the RADV Vulkan device were each reimplemented in three or four scripts and had drifted. One of the copies carried the `print gpu` bug that silently benchmarked the CPU. Now sourced by all eight `run/` and `bench/` scripts, each function overridable (`VEGA8_PCI_ID`, `VEGA8_RENDER_NODE`, `VEGA8_CARD_DIR`, `VEGA8_ROCM_DEVICE`, `VEGA8_VULKAN_DEV`). This also closed the hardcoded `-dev Vulkan0` in the benchmark harness
 - [ ] Make the server port configurable end-to-end — the Docker launchers hardcode the `-p 8080:8080` mapping, so `PORT=` in `run/start-llama-server.sh` only works for the Vulkan/CPU/baremetal modes
 - [x] **llama.cpp pinned across all four build paths (2026-09-08)** — `build/llama.cpp-ref` holds the commit; the baremetal script, the Vulkan script and both Dockerfiles read it (`--build-arg LLAMA_CPP_REF`). They had each cloned `master` independently, which is how a 465e49b baremetal came to be compared against a 67672dc image. `build/llama-cpp-ref.sh` rejects short SHAs — `git fetch --depth 1` cannot fetch them, and a build silently compiled the wrong commit once
 - [ ] **Speculative decoding on Vega 8** — decode is DDR4-bandwidth-bound (~25–30 t/s ceiling for the 35B-A3B at 4200 MT/s); draft-token batching is the only lever past that ceiling since drafted tokens are verified in one batched pass over the weights. Test `llama-server -md <draft.gguf> --draft-max 16 --draft-min 1` with a small same-family draft (e.g. Qwen3.5-0.5B/1.7B Q4). Expected +30–80 % decode if acceptance rate is good; works today on the iGPU alone, and if a dGPU accelerator is installed later, pin the draft to it with `--device-draft`

@@ -53,41 +53,12 @@ if [ ! -f "$MODEL" ]; then
 fi
 
 # ─── Detect Vega 8 ROCm agent index ─────────────────────────────────────────
-# rocminfo prints each agent's short "Name: gfxXXX" line BEFORE its
-# "Device Type: GPU" line, so we remember the last seen name and assign
-# 0-based GPU indices in enumeration order (same order ROCR_VISIBLE_DEVICES
-# uses). Vega APUs are gfx900/gfx902/gfx909/gfx90c.
+# Detection lives in lib/vega8.sh so every script in this repo agrees. Override
+# with VEGA8_ROCM_DEVICE=<index>.
 
-detect_vega8_rocm_index() {
-    if [ -n "${VEGA8_ROCM_DEVICE:-}" ]; then
-        echo "$VEGA8_ROCM_DEVICE"
-        return
-    fi
+. "$SCRIPT_DIR/../lib/vega8.sh"
 
-    local rocminfo_bin="$ROCM_PATH/bin/rocminfo"
-    [ -x "$rocminfo_bin" ] || rocminfo_bin="$(command -v rocminfo || true)"
-    if [ -z "$rocminfo_bin" ]; then
-        echo "0"   # fallback
-        return
-    fi
-
-    "$rocminfo_bin" 2>/dev/null | awk '
-        $1 == "Name:" && $2 ~ /^gfx/  { name = $2 }
-        /Device Type:[[:space:]]+GPU/ {
-            # print gpu+0, not gpu: when the Vega 8 is the first GPU its index
-            # is 0 and `gpu` was never assigned, so bare `print gpu` emits an
-            # EMPTY string. That becomes ROCR_VISIBLE_DEVICES="", which hides
-            # every GPU and silently falls back to CPU ("no usable GPU found").
-            # Masked until September 2026, when the dGPUs left and the Vega
-            # became index 0 for the first time.
-            if (name ~ /^gfx90[029c]$/) { print gpu+0; found = 1; exit }
-            gpu++
-        }
-        END { if (!found) print 0 }
-    '
-}
-
-VEGA8_IDX=$(detect_vega8_rocm_index)
+VEGA8_IDX=$(vega8_rocm_index)
 echo "  Vega 8 ROCm device index: $VEGA8_IDX"
 
 # ─── Preflight: host ROCm must still support the gfx900 path ────────────────

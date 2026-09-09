@@ -105,15 +105,9 @@ export ROC_ENABLE_PRE_VEGA=1
 # ─── Render device hint ───
 # Point to the AMD APU render node explicitly. The PCI address moves when
 # discrete GPUs are added/removed, so detect it by PCI device ID (0x1638).
-VEGA8_PCI_ADDR=""
-VEGA8_RENDER_NODE=""
-for _node in /sys/class/drm/renderD*/device; do
-    if [ "$(cat "$_node/device" 2>/dev/null)" = "0x1638" ]; then
-        VEGA8_RENDER_NODE="/dev/dri/$(basename "$(dirname "$_node")")"
-        VEGA8_PCI_ADDR="$(basename "$(readlink -f "$_node")")"   # e.g. 0000:10:00.0
-        break
-    fi
-done
+. "$(cd "$(dirname "$0")" && pwd)/../lib/vega8.sh"
+VEGA8_RENDER_NODE="$(vega8_render_node || true)"
+VEGA8_PCI_ADDR="$(vega8_pci_addr || true)"        # e.g. 0000:0a:00.0
 if [ -n "$VEGA8_PCI_ADDR" ]; then
     export DRI_PRIME="pci-${VEGA8_PCI_ADDR//[:.]/_}"
 fi

@@ -1,0 +1,4 @@
+# Vulkan -ub 2048 vs 4096 at -r 3, prefill only, 2026-09-09.
+# Re-tests the two cells where -ub 4096 regressed at -r 1, plus their -fa 1 controls.
+# -b is held equal to -ub, matching how both prior runs were measured.
+model	fa	context	ubatch	prefill_t_per_s	stddev

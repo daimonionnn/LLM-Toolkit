@@ -29,26 +29,11 @@ MODEL_NAME="$(basename "$MODEL")"
 shift
 
 # ── Detect Vega 8 render node by PCI device ID ───────────────────────────────────────
-# Ryzen 5700G Vega 8 = PCI device ID 0x1638 (gfx90c). The render node number
-# moves when discrete GPUs change (renderD128 as of September 2026) — hence PCI-ID
-# detection. Override with VEGA8_RENDER_NODE=/dev/dri/renderDXXX if it fails.
-# TODO: this detection block is copy-pasted in run-docker-rocm.sh,
-#       bench/run-all-benchmarks.sh, bench/tune-rocm7-vega.sh and
-#       launch-lmstudio-vulkan.sh — extract into a shared sourced helper
-#       (e.g. run/lib-vega8-detect.sh) so a fix lands everywhere at once.
-VEGA8_PCI_ID="0x1638"
-VEGA8_RENDER_NODE="${VEGA8_RENDER_NODE:-}"
-
-if [ -z "$VEGA8_RENDER_NODE" ]; then
-    for node in /sys/class/drm/renderD*/device; do
-        dev_id="$(cat "$node/device" 2>/dev/null || true)"
-        if [ "$dev_id" = "$VEGA8_PCI_ID" ]; then
-            render_name="$(basename "$(dirname "$node")")"
-            VEGA8_RENDER_NODE="/dev/dri/$render_name"
-            break
-        fi
-    done
-fi
+# Detection lives in lib/vega8.sh so every script in this repo agrees. The render
+# node number moves when discrete GPUs change (renderD128 as of September 2026),
+# hence PCI-ID matching. Override with VEGA8_RENDER_NODE=/dev/dri/renderDXXX.
+. "$(cd "$(dirname "$0")" && pwd)/../lib/vega8.sh"
+VEGA8_RENDER_NODE="$(vega8_render_node || true)"
 
 if [ -z "$VEGA8_RENDER_NODE" ]; then
     echo "⚠  Could not auto-detect Vega 8 render node (PCI ID $VEGA8_PCI_ID)."
