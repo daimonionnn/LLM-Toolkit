@@ -99,9 +99,10 @@ amdgpu: [drm] device wedged, but recovered through reset
 ```
 
 **Cause:** a single compute dispatch runs longer than the driver's watchdog. It is *not*
-out of memory — it happens with tens of GB free. The work in one attention dispatch scales
-with `ctx × ubatch × head_dim`, and that product, not `ctx × ubatch` alone, is what
-predicts the hang. Measured on Vulkan:
+out of memory — it happens with tens of GB free. The work scales with
+`n_kv × ubatch × head_dim`, where `n_kv` is how many tokens are **actually in the KV cache
+when the dispatch runs** — not the context you loaded the model with. Loading a 128k
+context costs memory, not dispatch time; only filling it hurts. Measured on Vulkan:
 
 | Model | Head dim | ctx | ub | ctx × ub | × head dim | Result |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
@@ -117,8 +118,11 @@ the gemma 32K/2048 case safe, and it crashes.
 
 **Fix:** lower the micro-batch. `run/start-llama-server.sh` derives it automatically as
 `min(4096, 2²⁵/CTX)` — 2²⁵ rather than 2²⁶ because the cap has to hold for the largest
-head dim in use here (512). If you pass `-ub` yourself, keep `ctx × ub × head_dim` under
-about 20e9. The GPU recovers on its own via a ring reset, but the server process dies.
+head dim in use here (512). It derives from `CTX` because a server cannot know in advance
+how long a prompt it will be handed, so it must survive a full context; if you know your
+prompts stay short, a larger `-ub` is safe at any allocation and `UBATCH=` overrides it.
+Passing `-ub` yourself, keep `n_kv × ub × head_dim` under about 20e9. The GPU recovers on
+its own via a ring reset; the server usually returns HTTP 500 and stays up, but it can die.
 
 This is a Vulkan limit, not a hardware one: ROCm ran `32768 × 4096` on the 35B fine
 (99.31 t/s prefill). The launcher caps the two backends separately — `2²⁵/CTX` for Vulkan,

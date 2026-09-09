@@ -197,8 +197,9 @@ capability at 4K.
 followed by a successful ring reset. **A compute-ring watchdog timeout, not an OOM** — it
 happens with tens of GB free.
 
-The work in one attention dispatch scales with `ctx × ubatch × head_dim`, and that
-product, not `ctx × ubatch`, is what predicts the hang:
+The work in one attention dispatch scales with `n_kv × ubatch × head_dim` — where `n_kv`
+is how many tokens are **actually in the KV cache when the dispatch runs**, not the context
+the model was loaded with. That product is what predicts the hang:
 
 | Model | Head dim | ctx | ub | ctx × ub | × head dim | Result |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
@@ -209,6 +210,33 @@ product, not `ctx × ubatch`, is what predicts the hang:
 
 The two failures share 34.4e9 and the two passes share 17.2e9, while `ctx × ubatch` alone
 puts a pass and a failure in the same 67.1 M bucket.
+
+#### Allocated context is not the variable — `n_kv` is
+
+The rows above all fill the context they allocate, so they cannot separate the two. This
+run does, by holding the allocation fixed at 128k and varying only the prompt
+(gemma, Vulkan, `-c 131072 -b 4096 -ub 4096 -fa 1`, raw data:
+[`bench/results/2026-09-09-nkv-not-ctx.tsv`](../bench/results/2026-09-09-nkv-not-ctx.tsv)):
+
+| Allocated `-c` | Actual prompt (`n_kv`) | `n_kv × ub × head` | Result |
+| ---: | ---: | ---: | --- |
+| 131 072 | 61 | 0.13e9 | OK, 1.3 s |
+| 131 072 | 6 021 | 12.6e9 | OK, 35.9 s |
+| 131 072 | ~16 000 | **33.6e9** | **DEVICE LOST** — `ring comp_1.2.0 timeout` |
+
+The same 128k context both works and wedges the GPU. **Allocating a large context is just
+memory; it costs no dispatch time until you fill it.** The 34.4e9 threshold holds.
+
+This is why LM Studio runs gemma at a 128k context with `evalBatchSize 4096` on Vulkan
+without trouble — a chat turn puts a few hundred tokens in the cache, nowhere near the
+limit. Paste a 16k-token document into that same configuration and it hangs the ring
+exactly as above; the setting is not safer there, it is just never exercised.
+
+A launcher cannot know `n_kv` ahead of time, so `start-llama-server.sh` derives its cap
+from `CTX` — the worst case, a prompt that fills the context. That is the right default for
+a server that may be handed anything, but it is pessimistic for interactive use: if you
+know your prompts stay short, a much larger `-ub` is safe at any allocation, and `UBATCH=`
+overrides the derivation.
 
 `run/start-llama-server.sh` derives `UBATCH` as `min(4096, 2²⁵/CTX)` unless it is set
 explicitly — 2²⁵ rather than 2²⁶ so the bound holds for head dim 512. **It is a four-point

@@ -1,0 +1,10 @@
+# Vulkan compute-ring hang: the driver is n_kv, not the allocated context.
+# gemma-4-E4B-it-Q4_K_M (head dim 512), llama-server, Vulkan0,
+# -ngl 99 -c 131072 -b 4096 -ub 4096 -fa 1, build 465e49b.
+# The SAME allocated 128k context both works and kills the GPU, depending only
+# on how many tokens are actually in the KV cache at dispatch time.
+# alloc_ctx = -c value; n_kv = measured prompt_tokens; product = n_kv*ubatch*head_dim
+alloc_ctx	n_kv	ubatch	head_dim	product	seconds	result
+131072	61	4096	512	0.13e9	1.3	ok
+131072	6021	4096	512	12.6e9	35.9	ok
+131072	16000	4096	512	33.6e9	91	device_lost (ring comp_1.2.0 timeout, recovered by reset; server survived, returned HTTP 500)

@@ -52,13 +52,26 @@ CTX="${CTX:-8192}"
 #
 # The limit is NOT the ctx x ubatch product alone — it scales with the model's
 # attention head dimension, i.e. with the work in one dispatch. Measured:
-#   model  head  ctx    ub     ctx*ub    ctx*ub*head   result
+#   model  head  n_kv   ub     n_kv*ub   n_kv*ub*head  result
 #   Qwen    256  32768  2048    67.1M       17.2e9     OK (120.1 t/s)
 #   Qwen    256  32768  4096   134.2M       34.4e9     DEVICE LOST
 #   gemma   512  32768  2048    67.1M       34.4e9     DEVICE LOST
 #   gemma   512  16384  2048    33.6M       17.2e9     OK
-# So the failures line up on ctx*ub*head, not on ctx*ub: gemma dies at exactly
-# the product this cap used to call safe. Lowering iGPU clocks, disabling its
+# So the failures line up on n_kv*ub*head, not on n_kv*ub: gemma dies at exactly
+# the product this cap used to call safe.
+#
+# n_kv, NOT the allocated context. Verified 2026-09-09 by holding -c at 131072
+# and varying only the prompt (gemma, Vulkan, -ub 4096): 61 tokens = 1.3 s ok,
+# 6021 = 35.9 s ok, ~16000 = DEVICE LOST. The same allocation both works and
+# wedges the ring. Allocating a big context costs memory, not dispatch time.
+# This is why LM Studio runs gemma at 128k with evalBatchSize 4096 on Vulkan
+# without trouble: a chat turn never fills the cache. Paste a 16k-token document
+# in and it hangs identically.
+#
+# A launcher cannot know n_kv in advance, so it derives from CTX -- the worst
+# case, a prompt that fills the context. Right default for a server that may be
+# handed anything, pessimistic if you know your prompts stay short: then set
+# UBATCH= explicitly and a much larger micro-batch is safe at any allocation. Lowering iGPU clocks, disabling its
 # Curve Optimizer and cutting CPU boost did not change it — it is the workload,
 # not the voltage.
 #
