@@ -22,32 +22,45 @@ Toolkit for ROCm and Vulkan LLM inference on Vega APUs/GPUs (tested on AMD Ryzen
 
 ### Benchmarks — September 2026
 
-All figures `llama-bench`, `-ngl 99 -ub 2048`, ROCm carrying
-[`patches/0001`](patches/README.md), machine cooled below 55 °C between runs.
-Prefill = prompt processing, TG = token generation at that KV depth. Raw data:
-[bench/results/2026-09-08-matrix.tsv](bench/results/2026-09-08-matrix.tsv).
-
-#### Qwen3.5-35B-A3B Q4_K_M — MoE, 34.7 B total / ~3 B active, head dim 256
-
-| Backend | Prefill 4K | Prefill 16K | Prefill 32K | TG 4K | TG 16K | TG 32K |
-|---|---:|---:|---:|---:|---:|---:|
-| **Vulkan `-fa 1`** | **188.5** | 151.5 | **120.1** | **21.2** | **19.2** | **17.1** |
-| Vulkan `-fa 0` | 187.4 | **156.6** | 116.4 | 18.9 | 13.5 | 9.7 |
-| **ROCm `-fa 1`** | 139.3 | 123.7 | 107.9 | 18.8 | 17.4 | 15.9 |
-| ROCm `-fa 0` | 136.5 | 119.3 | 96.6 | 15.2 | 9.3 | 5.9 |
-| CPU `-fa 0` | 83.9 | 71.7 | 59.7 | 16.1 | 13.5 | 11.1 |
-| CPU `-fa 1` | 85.1 | 71.1 | 58.3 | 15.3 | 8.1 | 4.3 |
+`llama-bench -ngl 99`, ROCm carrying [`patches/0001`](patches/README.md), machine cooled
+below 55 °C between runs. Prefill = prompt processing, TG = token generation at that KV
+depth. Every row is at the micro-batch that backend actually ships, given in its own
+column — ROCm 4096, Vulkan 2048, CPU the 512 default. **TG does not depend on the
+micro-batch**, so those columns carry over unchanged. Raw data:
+[2026-09-08 matrix](bench/results/2026-09-08-matrix.tsv),
+[`-ub` sweep](bench/results/2026-09-09-ub-sweep.tsv).
 
 #### gemma-4-E4B-it Q4_K_M — dense, 7.5 B, head dim 512
 
-| Backend | Prefill 4K | Prefill 16K | Prefill 32K | TG 4K | TG 16K | TG 32K |
-|---|---:|---:|---:|---:|---:|---:|
-| **Vulkan `-fa 1`** | **179.4** | **155.1** | — | **17.3** | **15.3** | — |
-| Vulkan `-fa 0` | 166.4 | 150.2 | — | 15.0 | 12.0 | — |
-| **ROCm `-fa 1`** | 160.3 | 145.9 | **131.9** | 15.0 | 13.6 | **12.2** |
-| ROCm `-fa 0` | 153.6 | 138.7 | 121.2 | 12.0 | 9.3 | 7.1 |
-| CPU `-fa 0` | 84.9 | 77.3 | 69.0 | 13.8 | 11.4 | 9.7 |
-| CPU `-fa 1` | 89.4 | 78.0 | 67.1 | 12.6 | 7.9 | 5.3 |
+| Backend | `-ub` | Prefill 4K | Prefill 16K | Prefill 32K | TG 4K | TG 16K | TG 32K |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **ROCm `-fa 1`** | 4096 | **249.0** | **202.1** | **173.8** | 15.0 | 13.6 | **12.2** |
+| ROCm `-fa 0` | 4096 | 205.3 | 177.3 | 149.5 | 12.0 | 9.3 | 7.1 |
+| **Vulkan `-fa 1`** | 2048 | 179.4 | 155.1 | — | **17.3** | **15.3** | — |
+| Vulkan `-fa 0` | 2048 | 166.5 | 150.3 | — | 15.0 | 12.0 | — |
+| CPU `-fa 0` | 512 | 84.9 | 77.3 | 69.1 | 13.8 | 11.4 | 9.7 |
+| CPU `-fa 1` | 512 | 89.4 | 78.0 | 67.1 | 12.6 | 7.9 | 5.3 |
+
+**ROCm takes the dense model outright** — 30–39 % ahead of Vulkan on prefill at every
+context, and the only backend that runs it at 32K at all. That is the largest single
+result here, and it only appears at `-ub 4096`: the same rows at 2048 read
+160 / 146 / 132, which is where this table used to stop.
+
+#### Qwen3.5-35B-A3B Q4_K_M — MoE, 34.7 B total / ~3 B active, head dim 256
+
+| Backend | `-ub` | Prefill 4K | Prefill 16K | Prefill 32K | TG 4K | TG 16K | TG 32K |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **Vulkan `-fa 1`** | 2048 | **188.5** | 151.5 | **120.1** | **21.2** | **19.2** | **17.1** |
+| Vulkan `-fa 0` | 2048 | 187.4 | **156.6** | 116.4 | 18.9 | 13.5 | 9.7 |
+| **ROCm `-fa 1`** | 4096 | 151.9 | 130.1 | 112.6 | 18.8 | 17.5 | 15.9 |
+| ROCm `-fa 0` | 4096 | 144.2 | 123.2 | 99.3 | 15.2 | 9.4 | 5.9 |
+| CPU `-fa 0` | 512 | 83.9 | 71.7 | 59.7 | 16.1 | 13.5 | 11.1 |
+| CPU `-fa 1` | 512 | 85.1 | 71.1 | 58.3 | 15.3 | 8.1 | 4.3 |
+
+**Vulkan keeps the MoE model**, prefill and decode both. The bigger micro-batch is worth
+only 3–9 % here against 23–55 % on the dense model: with 8 of 256 experts active, `-ub
+2048` already puts 64 tokens on each expert — exactly MMQ's tile width — so there is
+nothing left for 4096 to fill. **Backend choice for prefill follows model density.**
 
 > **The four em dashes are not missing work.** gemma on Vulkan at 32K context hangs
 > the GPU compute ring — `ring comp_1.1.0 timeout`, `device wedged`, and once a full
@@ -55,27 +68,11 @@ Prefill = prompt processing, TG = token generation at that KV depth. Raw data:
 > Optimizer disabled, so it is the workload, not the silicon's margins. Do not run
 > that combination. See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
-#### Prefill at each backend's best `-ub` — what the launchers actually run
-
-The two tables above hold `-ub 2048` everywhere so the cells are comparable. That
-under-feeds ROCm badly on the dense model. At the micro-batch each backend ships
-(ROCm 4096, Vulkan capped by context), prefill looks different — measured 2026-09-09,
-[full sweep](docs/benchmarks.md#micro-batch-settled-4096-is-the-optimum-and-the-gain-depends-on-the-model):
-
-| Prefill, `-fa 1` | 4K | 16K | 32K |
-|---|---:|---:|---:|
-| **gemma — ROCm** | **249.0** | **202.1** | **173.8** |
-| gemma — Vulkan | 179.4 | 155.1 | — |
-| 35B — ROCm | 151.9 | 130.1 | 112.6 |
-| **35B — Vulkan** | **198.4** | **157.9** | **120.1** |
-
-**Backend choice for prefill follows model density.** The dense model gains 23–55 % from
-the larger micro-batch and ROCm wins it at every context; the MoE gains 3–9 %, because with
-8 of 256 experts active a 2048 micro-batch already fills MMQ's 64-column tiles, and Vulkan
-keeps that model. Decode is not micro-batch bound, so the decode column of the matrices
-above still stands — **Vulkan wins decode everywhere.**
-
-`-ub 8192` was measured and rejected: it lost on every cell, from −0.4 % to −17.3 %.
+Two micro-batch findings sit behind the `-ub` column, both in the
+[full sweep](docs/benchmarks.md#prefill-by-micro-batch-both-models-all-three-values):
+**`-ub 8192` is a loss everywhere** (−0.4 % to −17.3 %, and one out-of-memory), and
+**Vulkan at `-fa 0` loses ~8 % going from 2048 to 4096** — confirmed at `-r 3`, which is
+why the Vulkan rows stay at 2048.
 
 ### How to read this
 
