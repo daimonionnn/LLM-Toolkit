@@ -9,7 +9,7 @@
 #
 # Usage:
 #   ./run/run-rocm7-baremetal.sh /path/to/model.gguf [llama-server options]
-#   ./run/run-rocm7-baremetal.sh /path/to/model.gguf -ngl 99 -c 8192 -fa 0
+#   ./run/run-rocm7-baremetal.sh /path/to/model.gguf -ngl 99 -c 8192 -fa 1
 #
 # Multi-GPU system note:
 #   Auto-detects Vega 8 by its rocminfo agent index (gfx90x family).
@@ -36,11 +36,11 @@ if [ -z "${1:-}" ]; then
     echo ""
     echo "  -ngl 99       Offload all layers to GPU"
     echo "  -c 8192       Context size"
-    echo "  -fa 0         Flash attention (OFF recommended for ROCm on Vega 8)"
+    echo "  -fa 1         Flash attention (ON — this build carries patches/0001)"
     echo "  --no-warmup   Skip warmup inference"
     echo ""
     echo "Example:"
-    echo "  $0 ~/.lmstudio/models/.../model.gguf -ngl 99 -c 8192 -fa 0"
+    echo "  $0 ~/.lmstudio/models/.../model.gguf -ngl 99 -c 8192 -fa 1"
     exit 0
 fi
 
@@ -164,21 +164,31 @@ exec "$LLAMA_BIN" \
     -m "$MODEL" \
     --host 0.0.0.0 \
     --port 8080 \
-    -fa 0 \
+    -fa 1 \
     -b 4096 -ub 4096 \
     "$@"
 # All three flags are defaults, not constraints: "$@" comes last, so anything
 # you pass on the command line overrides them.
 #
-# -fa 0 (flash attention OFF): REQUIRED for usable prefill on this GPU. Leaving
-# it unset means -fa auto, which probes the backend, finds that the generic
-# FA tile kernel compiles for gfx900, and enables FA — on this hardware that
-# more than halves prefill. Measured 2026-09-08, gemma-4-E4B, 3330-token
-# prompt: -fa 0 = 112.8 t/s, -fa 1 = 48.9 t/s. The collapse is a gfx900 kernel
-# problem (no v_dot2_f32_f16, so the tile kernel's KQ loop falls back to ~5
-# VALU ops per 2 MACs) — see docs/ROCM-PERF-AUDIT.md.
-# Verified the same run: -fa auto = 48.9 t/s, i.e. identical to -fa 1, so
-# leaving -fa unset silently costs 57% of prefill.
+# -fa 1 (flash attention ON): correct ONLY because build/apply-patches.sh put
+# patches/0001 into this build. That patch makes the FA KQ accumulate use
+# v_mad_mix_f32, which gfx900 has and llama.cpp does not emit for it. With it,
+# -fa 1 wins both prefill and decode at every context (llama-bench, 2026-09-08):
+#   35B    prefill 4K/16K/32K   -fa 0: 136.5 / 119.3 /  96.6
+#                               -fa 1: 139.3 / 123.7 / 107.9
+#   35B    decode  4K/16K/32K   -fa 0:  15.2 /   9.4 /   5.9
+#                               -fa 1:  18.8 /  17.5 /  15.9
+#   gemma  decode  4K/16K/32K   -fa 0:  12.0 /   9.3 /   7.1
+#                               -fa 1:  15.0 /  13.6 /  12.2
+# On a STOCK ROCm build the opposite holds and -fa 0 is required: the generic FA
+# tile kernel falls back to ~5 VALU ops per 2 MACs and more than halves prefill
+# (gemma, 3330-token prompt: -fa 0 = 112.8 t/s, -fa 1 = 48.9). That is why
+# run-docker-rocm7.sh still passes -fa 0 — the Dockerfile does not apply the patch.
+#
+# Never leave -fa unset. It means -fa auto, which probes the backend, finds that
+# the tile kernel compiles for gfx900, and enables FA regardless of which build
+# you are running (verified: -fa auto = 48.9 t/s on the stock build, identical
+# to -fa 1). The probe cannot tell a patched build from an unpatched one.
 #
 # -ub 4096 (full-batch prefill): the single largest ROCm win found so far.
 # Measured 2026-09-08 with llama-bench on the 35B (cold prefill, -r 2):

@@ -20,61 +20,51 @@ Toolkit for ROCm and Vulkan LLM inference on Vega APUs/GPUs (tested on AMD Ryzen
 
 ## Performance
 
-### Vega 8 iGPU — September 2026 baseline (`-ngl 99 -c 8192 -ub 4096`)
+### Benchmarks — September 2026
 
-Prefill / decode t/s at ~128 / ~1024 / ~4096 tokens. Measured 2026-09-08 on Ubuntu
-26.04, 16 GB UMA carve-out, after the cooling fix. Each backend at its best flash-
-attention setting.
+All figures `llama-bench`, `-ngl 99 -ub 2048`, ROCm carrying
+[`patches/0001`](patches/README.md), machine cooled below 55 °C between runs.
+Prefill = prompt processing, TG = token generation at that KV depth. Raw data:
+[bench/results/2026-09-08-matrix.tsv](bench/results/2026-09-08-matrix.tsv).
 
-**Qwen3.5-35B-A3B Q4_K_M** (MoE)
+#### Qwen3.5-35B-A3B Q4_K_M — MoE, 34.7 B total / ~3 B active, head dim 256
 
-| Backend | Prefill | Decode |
-| ------- | ------- | ------ |
-| **Vulkan `-fa 1`** | **63 / 165 / 190** | **21 / 21 / 21** |
-| ROCm 7.2 `-fa 0` | 44 / 122 / 141 | 19 / 18 / 15 |
-| CPU (`-dev none`) | 84 / 91 / 86 | 18 / 18 / 15 |
+| Backend | Prefill 4K | Prefill 16K | Prefill 32K | TG 4K | TG 16K | TG 32K |
+|---|---:|---:|---:|---:|---:|---:|
+| **Vulkan `-fa 1`** | **188.5** | 151.5 | **120.1** | **21.2** | **19.2** | **17.1** |
+| Vulkan `-fa 0` | 187.4 | **156.6** | 116.4 | 18.9 | 13.5 | 9.7 |
+| **ROCm `-fa 1`** | 139.3 | 123.7 | 107.9 | 18.8 | 17.4 | 15.9 |
+| ROCm `-fa 0` | 136.5 | 119.3 | 96.6 | 15.2 | 9.3 | 5.9 |
+| CPU `-fa 0` | 83.9 | 71.7 | 59.7 | 16.1 | 13.5 | 11.1 |
+| CPU `-fa 1` | 85.1 | 71.1 | 58.3 | 15.3 | 8.1 | 4.3 |
 
-**gemma-4-E4B-it Q4_K_M** (dense)
+#### gemma-4-E4B-it Q4_K_M — dense, 7.5 B, head dim 512
 
-| Backend | Prefill | Decode |
-| ------- | ------- | ------ |
-| **ROCm 7.2 `-fa 0`** | 70 / 111 / **192** | 16 / 14 / 10 |
-| **Vulkan `-fa 1`** | **127 / 173** / 170 | **18 / 18 / 17** |
-| CPU (`-dev none`) | 96 / 94 / 88 | 15 / 14 / 12 |
+| Backend | Prefill 4K | Prefill 16K | Prefill 32K | TG 4K | TG 16K | TG 32K |
+|---|---:|---:|---:|---:|---:|---:|
+| **Vulkan `-fa 1`** | **179.4** | **155.1** | — | **17.3** | **15.3** | — |
+| Vulkan `-fa 0` | 166.4 | 150.2 | — | 15.0 | 12.0 | — |
+| **ROCm `-fa 1`** | 160.3 | 145.9 | **131.9** | 15.0 | 13.6 | **12.2** |
+| ROCm `-fa 0` | 153.6 | 138.7 | 121.2 | 12.0 | 9.3 | 7.1 |
+| CPU `-fa 0` | 84.9 | 77.3 | 69.0 | 13.8 | 11.4 | 9.7 |
+| CPU `-fa 1` | 89.4 | 78.0 | 67.1 | 12.6 | 7.9 | 5.3 |
 
-**Pick the backend by workload, not by reputation:**
+> **The four em dashes are not missing work.** gemma on Vulkan at 32K context hangs
+> the GPU compute ring — `ring comp_1.1.0 timeout`, `device wedged`, and once a full
+> machine lock. It reproduces with the iGPU downclocked to 2200 MHz and its Curve
+> Optimizer disabled, so it is the workload, not the silicon's margins. Do not run
+> that combination. See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
-| Workload | Use |
-| -------- | --- |
-| Decode, any model, any context | **Vulkan `-fa 1`** — still ahead, but by 13 % rather than the 178 % it was before the FA patch |
-| Long context (≥ 16K) | **Vulkan**, or ROCm `-fa 1` with the FA patch (14.9 t/s at 32K vs Vulkan's 17.1) |
-| Short prompts (~128 tok) | **Vulkan** — wins by 43–81 % |
-| Long prompts, MoE model | **Vulkan `-fa 1`** — wins by 35 % |
-| Long prompt + **short** answer, dense model | **ROCm `-fa 0`** — 13–17 % faster prefill, but only up to ~159 generated tokens |
+### How to read this
 
-Vulkan remains the right default (`run/start-llama-server.sh` with no flags). ROCm's one
-win — long-prompt prefill on a dense model — is paid back within ~159 generated tokens at
-4K context and ~47 tokens at 32K, because ROCm decode degrades far faster with context
-(−66 % from 1K to 32K, against Vulkan's −21 %). See
-[benchmarks.md](docs/benchmarks.md#long-context-the-rocm-gap-widens-sharply--2026-09-08).
-
-> **`-fa 1` on ROCm: use it for decode, not for prefill — and only with the local
-> patch.** [`patches/0001`](patches/README.md) makes the flash-attention KQ accumulate use
-> `v_mad_mix_f32`, an instruction gfx900 has and llama.cpp did not emit for it: 1 VALU op
-> per MAC instead of 2.5, and the spills that came with the old path's intermediates
-> disappear (10 598 → 6). ROCm decode at 32K goes 6.16 → **15.86 t/s (+157 %)** on the 35B
-> and 7.61 → **12.49 (+64 %)** on gemma; the long-context collapse disappears and the gap
-> to Vulkan at 32K falls from 178 % to 8 %. Prefill still prefers `-fa 0`. On Vulkan
-> `-fa 1` remains best for both.
-
-> **`-ub 4096` is not universally right — and above 16K context it can hang the GPU.**
-> It is worth +47 % to +85 % on long prompts, but it *costs* 8–14 % on ~128-token
-> prompts, and at 32K context on Vulkan it exceeds the compute-ring watchdog: the driver
-> resets the ring (`device wedged, but recovered through reset`) and the server dies with
-> `vk::DeviceLostError`. `start-llama-server.sh` therefore derives `UBATCH` as
-> `min(4096, 2²⁶/CTX)` — 4096 up to 16K context, 2048 at 32K. Set `UBATCH=` yourself to
-> override, lower it if `dmesg` shows a ring reset, and use `UBATCH=1024` or `512` for
-> short-prompt chat. Costs ~2 GB of GTT.
+| Question | Answer |
+|---|---|
+| Which backend by default? | **Vulkan `-fa 1`** — fastest at almost every cell, and the only one with no local patch |
+| Fastest 32K prefill on the dense model? | **ROCm `-fa 1`** (131.9) — Vulkan cannot run that cell at all |
+| Which `-fa` on ROCm? | **`-fa 1`, always.** With `patches/0001` it wins prefill *and* TG at every context. Without the patch, `-fa 0` |
+| Which `-fa` on Vulkan? | **`-fa 1`** — the one exception is 16K prefill on the 35B, where `-fa 0` is 3 % faster |
+| Which `-fa` on CPU? | **`-fa 0`.** `-fa 1` collapses with context — half the speed past 16K |
+| Is ROCm worth it? | For long-context TG the gap to Vulkan is now 8–20 %, down from 178 % before the patch. Vulkan still wins |
 
 > Full benchmark data in [docs/benchmarks.md](docs/benchmarks.md).
 
@@ -194,10 +184,10 @@ The `run/run-docker-rocm.sh` script applies several crucial flags to maximize in
 * `--ulimit memlock=-1`: Allows unlimited locked memory pages. ROCm relies on memory pinning to stream data between system RAM and the GPU cores without CPU pagetable management. Docker's default limit severely bottlenecks ROCm or causes crashes.
 
 #### `llama.cpp` Flags
-* `-fa 0` (Flash Attention OFF): benchmarked faster for ROCm on Vega 8 — FA ON costs 33–83 % prefill (see [docs/benchmarks.md](docs/benchmarks.md)). The launch scripts default to `-fa 0` for ROCm and `-fa 1` for CPU, where FA ON wins.
+* `-fa 1` (Flash Attention ON) **on a build carrying [`patches/0001`](patches/README.md)** — it wins both prefill and decode at every context, and lifts ROCm decode at 32K by 157 %. On a stock build FA costs 33–83 % of prefill on gfx900, so use `-fa 0` there. Never leave it at `auto`: the probe succeeds on gfx900 regardless of which build you are running. On CPU use `-fa 0` — `-fa 1` costs up to 61 % of decode at long context.
 * `-ngl 99`: Offloads all layers to the GPU.
-* `-b 2048 -ub 2048` (full-batch prefill): **~+22 % prefill at 4K context** on the Vega 8 vs the default `-ub 512`, no decode cost — now the default in `run/run-docker-rocm7.sh`. Smaller `-ub` *hurts* (under-fills the 8-CU GEMMs). See [docs/benchmarks.md](docs/benchmarks.md#rocm-72--vega-8-tuning-sweep-2026-06).
-* `-ctk q8_0` (optional): quantize the K cache — small decode gain at long context (+3.5 % @4K) and halves K-cache memory. K-only, since `-ctv` needs flash attention (which loses on Vega).
+* `-b 4096 -ub 4096` (full-batch prefill): **the largest runtime knob** — +70 % ROCm prefill at a 3330-token prompt against the `-ub 512` default, +47 % even at 32K, with no decode cost. Smaller `-ub` *hurts* (under-fills the 8-CU GEMMs). Cap it by context on Vulkan, where a large enough attention dispatch hangs the compute ring; `run/start-llama-server.sh` derives the cap for you. See [docs/benchmarks.md](docs/benchmarks.md#micro-batch--ub--the-largest-runtime-knob).
+* `-ctk q8_0` (recommended for long context): quantize the K cache — **+23.5 % ROCm decode at 32K**, +6.8 % at 4K, +2.7 % at 1K, and halves K-cache memory. The gain scales with context, which is why a 4K-only measurement in June recorded it as "+3.5 %, small".
 * `-t N` (Recommended to add at runtime): Set to your physical CPU core count (e.g., `-t 4` or `-t 8`). Prevents CPU thrashing and saves thermal/power budget for the Vega iGPU.
 * `-nkvo` (`--no-kv-offload`): **Do not use unless necessary!** Forces the Key-Value (KV) cache to stay in standard CPU RAM instead of VRAM. Only use this if your model is so large that adding a context window crashes the GPU with Out-of-Memory (OOM) errors.
 
@@ -373,14 +363,14 @@ amd-vega-rocm-vulkan-llm-toolkit/
 - [x] **CPU prefill gap resolved (2026-09-08)** — the pre-September CPU rows were measured with `-ngl 0`, which no longer forces CPU-only execution (91 % GPU busy, 6.5 GB in GTT), so they are GPU runs mislabelled as CPU. Real CPU-only prefill is 99 / 98 / 93 t/s on gemma, confirmed by `llama-bench -dev none` and the server harness independently (within 3 %). The May figure of 840 t/s is 1.6–3× above the arithmetic ceiling of eight Zen 3 cores and cannot be a real measurement. Harness fixed to `-dev none`; historical rows struck through
 - [x] **Cooling fixed enough to stop throttling (2026-09-07)** — raising the fan curve took the peak from 105.4 °C to 89.5 °C, the average from 90.5 °C to 79.7 °C, and samples over Tjmax from 27 to **0**; iGPU SCLK now holds 2400 → 2351 MHz instead of dropping to 2208. Worth ~6–8 % prefill on every backend, so all published numbers were re-measured after the fix
 - [x] **BIOS retune (2026-09-07)** — UMA carve-out 2 → 16 GB, Curve Optimizer −10 → −15, IOMMU off, iGPU boost +200 MHz, throttle limit 90 → 99 °C. Net on gemma: ROCm +22 % prefill / +12 % decode, Vulkan +5 % decode, CPU ~unchanged; peak temp fell to 86.6 °C. The iGPU boost changed the DPM table but not the observed 2400 MHz clock, and IOMMU off changed nothing measurable
-- [x] **`-fa auto` trap fixed in the ROCm launcher (2026-09-08)** — `run/run-rocm7-baremetal.sh` passed no `-fa`, so it resolved to `auto`, which probes the backend, finds the generic FA tile kernel compiles for gfx900, and enables flash attention. Measured on gemma at a 3330-token prompt: `-fa 0` = 112.8 t/s, `-fa 1` = 48.9, **`-fa auto` = 48.9**. Anyone using the launcher without passing `-fa 0` was silently getting 43 % of achievable prefill. Launcher now defaults to `-fa 0` (still overridable)
+- [x] **`-fa auto` trap fixed in the ROCm launcher (2026-09-08)** — `run/run-rocm7-baremetal.sh` passed no `-fa`, so it resolved to `auto`, which probes the backend, finds the generic FA tile kernel compiles for gfx900, and enables flash attention. Measured on gemma at a 3330-token prompt: `-fa 0` = 112.8 t/s, `-fa 1` = 48.9, **`-fa auto` = 48.9**. Anyone using the launcher without passing `-fa 0` was silently getting 43 % of achievable prefill. Both ROCm launchers now pass `-fa` explicitly, and they differ on purpose: `-fa 1` for baremetal, which carries `patches/0001`, and `-fa 0` for the Docker image, which does not. The `auto` probe cannot tell a patched build from a stock one
 - [x] **Qwen3.5-35B re-benchmarked (2026-09-07)** — 20 GB model loads on ROCm without the documented hard freeze. Vulkan `-fa 1` is the best path (21 t/s decode to 4K, 159 t/s prefill at 1K); both GPU backends beat May 2026 by 12–24 %
 - [x] **Flash attention fixed on gfx900 (2026-09-08)** — `V_DOT2_F32_F16_AVAILABLE` excludes GCN5, so the FA KQ accumulate fell back to 5 VALU ops per 2 MACs with an fp16 product, and its intermediates pushed 50 of 60 config rows into spilling (up to 2262 VGPRs). gfx900 has `v_mad_mix_f32` — 1 op per MAC, product in fp32. `patches/0001`: ROCm decode at 32K **6.16 → 15.86 t/s (+157 %)** on the 35B, **7.61 → 12.49 (+64 %)** on gemma; spills 10 598 → 6; gap to Vulkan at 32K from 178 % to 8 %; error vs fp64 from 6.1e-3 to 1.4e-6. `test-backend-ops` 2959/2959. A first attempt that raised occupancy instead fixed the symptom and was dropped — it is a net loss on top of this one
-- [x] **`-ub 4096` adopted, capped by context (2026-09-08)** — worth +47 % to +85 % prefill on long prompts, but `ctx × ubatch > 2²⁶` hangs the Vulkan compute ring, so the launcher derives `min(4096, 2²⁶/CTX)`
+- [x] **`-ub 4096` adopted, capped by context (2026-09-08)** — worth +47 % to +85 % prefill on long prompts, but a large enough attention dispatch hangs the Vulkan compute ring, so the launcher derives `min(4096, 2²⁵/CTX)`. The threshold tracks `ctx × ubatch × head_dim`, not `ctx × ubatch`: the first cap (2²⁶, from the 35B alone) called gemma at 32K/`-ub 2048` safe and it crashes. 2²⁵ holds for head dim 512
 - [x] **`-ctk q8_0` adopted for long context (2026-09-08)** — +2.7 % at 1K but **+23.5 % at 32K**; June's "+3.5 %, small" was measured only at 4K
 - [x] **Clock pinning dropped (2026-09-08)** — no effect now that the cooling fix stopped the throttling that made it look useful in June
-- [ ] **Prefill matrix at `-ub 4096`** — the 2026-09-08 matrix uses `-ub 2048` uniformly so every cell is comparable; this one shows what the larger micro-batch buys. Prefill only, since decode is not micro-batch bound and the existing numbers carry over. **Leave Vulkan @ 32K as an em dash, not a substituted `-ub 2048` figure** — that cell is a crash (`ctx × ubatch > 2²⁶` hangs the compute ring), and filling it from a different configuration would put two meanings in one table. Worth re-running that one case first to confirm it still fails: it was observed once, and if it turns out to be intermittent the launcher's derived cap needs revisiting rather than a footnote
-- [ ] **The `-ub` cap in `start-llama-server.sh` is Vulkan-derived but applied to ROCm too** — `min(4096, 2²⁶/CTX)` came from a Vulkan crash at `32768 × 4096 = 134.2 M`. ROCm ran that exact product fine (99.31 t/s), so the threshold is a property of Vulkan's dispatch shape, not of the hardware, and ROCm is being throttled for no reason. Measure ROCm's own limit and split the cap per backend
+- [ ] **Prefill matrix at `-ub 4096`** — the 2026-09-08 matrix uses `-ub 2048` uniformly so every cell is comparable; this one shows what the larger micro-batch buys. Prefill only, since decode is not micro-batch bound and the existing numbers carry over. **Leave Vulkan @ 32K as an em dash, not a substituted `-ub 2048` figure** — that cell is a crash (the attention dispatch exceeds the Vulkan compute ring's watchdog), and filling it from a different configuration would put two meanings in one table. Worth re-running that one case first to confirm it still fails: it was observed once, and if it turns out to be intermittent the launcher's derived cap needs revisiting rather than a footnote
+- [x] **`-ub` cap split per backend (2026-09-09)** — the derived `min(4096, 2²⁵/CTX)` came from Vulkan crashes. ROCm ran that exact product fine (99.31 t/s), so the threshold is a property of Vulkan's dispatch shape, not of the hardware, and applying it to ROCm was throttling that backend for nothing. `start-llama-server.sh` now derives a cap per backend: `2²⁵/CTX` for Vulkan, `2²⁶/CTX` for ROCm — twice Vulkan's, and the largest product any ROCm run has actually demonstrated (34.4e9, reached from both directions). Not a flat `-ub 4096`, which would put gemma at 32K on 68.7e9, double anything measured on either backend. ROCm's real ceiling is still unmeasured — the open `-ub 8192` probe below would find it
 - [ ] **Probe `-ub 8192` on ROCm at 16K and 32K prompts** — prefill was still climbing at 4096 (32K prompt: 67.38 → 99.31 from `-ub` 512 → 4096), so the "ubatch ≥ prompt length" rule has not been shown to saturate. Memory fits: `32768 × 8192 × 16 heads × 4 B` = 17.2 GB of KQ plus 20 GB of weights against 42 GB free. Watch `dmesg` for ring resets. Not worth testing on Vulkan — there `-ub 8192` is only safe to 8K context, where a prompt is at most 8192 tokens and `-ub 4096` already covers most of it
 - [ ] **Send `patches/0001` upstream** — it fixes the whole GCN5 class, not just this box
 - [ ] **Explain ROCm's gain from the BIOS retune** — per-phase sampling shows **ROCm never uses the BIOS carve-out** (VRAM ~300 MB, whole model in GTT) on both gemma and the 35B, so the carve-out cannot be the cause. An earlier commit claimed it was, from a whole-run VRAM peak that actually belonged to the Vulkan phase; corrected in [benchmarks.md](docs/benchmarks.md). The real cause is unidentified — four other settings changed at once

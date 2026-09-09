@@ -45,24 +45,59 @@ CTX="${CTX:-8192}"
 # from the upstream default of 512 to 4096. The win comes from filling the MoE
 # expert tiles; it costs ~2 GB of extra GTT at -c 8192.
 #
-# The cap is NOT optional. At 32K context with -ub 4096 the Vulkan backend
-# exceeds the GPU's compute-ring watchdog and the driver resets the ring:
-#   amdgpu: ring comp_1.0.1 timeout ... device wedged, but recovered through reset
-# and llama-bench dies with vk::DeviceLostError. Measured 2026-09-08:
-#   ctx  8192 x ub 4096 =  33.6M  OK
-#   ctx 16384 x ub 4096 =  67.1M  OK
-#   ctx 32768 x ub 2048 =  67.1M  OK   (120.1 t/s, the best that works at 32K)
-#   ctx 32768 x ub 4096 = 134.2M  DEVICE LOST
-# The failures track the ctx x ubatch product, so cap it at 2^26. That is a
-# three-point fit, not a law — treat it as a conservative bound and lower UBATCH
-# further if you see a ring reset in dmesg.
+# The cap is NOT optional. Too large a micro-batch makes one Vulkan compute
+# dispatch outrun the driver's watchdog; the ring is reset, the server dies with
+# vk::DeviceLostError, and on one occasion the machine hard-locked:
+#   amdgpu: ring comp_1.1.0 timeout ... device wedged, but recovered through reset
+#
+# The limit is NOT the ctx x ubatch product alone — it scales with the model's
+# attention head dimension, i.e. with the work in one dispatch. Measured:
+#   model  head  ctx    ub     ctx*ub    ctx*ub*head   result
+#   Qwen    256  32768  2048    67.1M       17.2e9     OK (120.1 t/s)
+#   Qwen    256  32768  4096   134.2M       34.4e9     DEVICE LOST
+#   gemma   512  32768  2048    67.1M       34.4e9     DEVICE LOST
+#   gemma   512  16384  2048    33.6M       17.2e9     OK
+# So the failures line up on ctx*ub*head, not on ctx*ub: gemma dies at exactly
+# the product this cap used to call safe. Lowering iGPU clocks, disabling its
+# Curve Optimizer and cutting CPU boost did not change it — it is the workload,
+# not the voltage.
+#
+# A shell launcher cannot read the head dimension out of the GGUF, so the default
+# assumes the larger case (512) and caps ctx*ub at 2^25. On a 256-head model that
+# leaves roughly a factor of two on the table; raise it deliberately with UBATCH=
+# if you know your model's head dimension, and lower it if dmesg shows a ring
+# reset. Guessing high here costs a frozen desktop, guessing low costs prefill.
+#
+# The 2^25 cap is Vulkan's, and only Vulkan's. ROCm ran the exact product that
+# kills Vulkan — 32768 x 4096 x 256 = 34.4e9 on the 35B — at 99.31 t/s prefill,
+# so the limit is a property of Vulkan's dispatch shape, not of the hardware.
+# ROCm therefore gets its own cap, at 2^26: twice Vulkan's, and the largest value
+# any ROCm run has actually demonstrated (34.4e9, reached from both directions —
+# 35B at 32768x4096x256, gemma at 32768x2048x512).
+#
+# Not a flat -ub 4096, tempting as that is. That would put gemma at 32k on
+# 32768 x 4096 x 512 = 68.7e9, double anything measured on either backend, and
+# the point of this whole block is that an unvalidated guess here costs a frozen
+# desktop. Probing ROCm's real ceiling is open work — see the README TODO.
 BATCH="${BATCH:-4096}"
+UBATCH_SET=1
 if [ -z "${UBATCH:-}" ]; then
-    UBATCH=$(( 67108864 / CTX ))
+    UBATCH_SET=0
+    UBATCH=$(( 33554432 / CTX ))
     [ "$UBATCH" -gt 4096 ] && UBATCH=4096
     [ "$UBATCH" -lt 512 ]  && UBATCH=512
 fi
 [ "$BATCH" -lt "$UBATCH" ] && BATCH="$UBATCH"
+
+# ROCm's own batch flags: the derived cap above unless you asked for one.
+ROCM_UBATCH="$UBATCH"
+ROCM_BATCH="$BATCH"
+if [ "$UBATCH_SET" -eq 0 ]; then
+    ROCM_UBATCH=$(( 67108864 / CTX ))
+    [ "$ROCM_UBATCH" -gt 4096 ] && ROCM_UBATCH=4096
+    [ "$ROCM_UBATCH" -lt 512 ]  && ROCM_UBATCH=512
+    [ "$ROCM_BATCH" -lt "$ROCM_UBATCH" ] && ROCM_BATCH="$ROCM_UBATCH"
+fi
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -116,41 +151,67 @@ case "$MODE" in
         # -dev none, NOT -ngl 0: upstream changed the -ngl default to auto, and
         # with a GPU backend present `-ngl 0` still offloads (measured 2026-09-08:
         # 91% GPU busy, 6.5 GB in GTT). Only -dev none is actually CPU-only.
+        # -fa 0, not -fa 1: on the CPU backend flash attention collapses with
+        # context. Measured 2026-09-08 (llama-bench, decode t/s at depth):
+        #   35B    4K/16K/32K   -fa 0: 16.13 / 13.46 / 11.08
+        #                       -fa 1: 15.29 /  8.14 /  4.31
+        #   gemma  4K/16K/32K   -fa 0: 13.78 / 11.41 /  9.71
+        #                       -fa 1: 12.55 /  7.94 /  5.29
+        # -fa 1 is marginally better only at short context on the 35B, and worse
+        # everywhere else — by a factor of two past 16K.
         exec "$SCRIPT_DIR/run-llamaserver-vulkan.sh" \
             "$MODEL" \
             -dev none -c "$CTX" --port "$PORT" --no-warmup \
-            -fa 1 \
+            -fa 0 \
             "$@"
         ;;
     --rocm-docker)
         shift
         banner "ROCm 7.2 Docker"
         free_port
+        # -fa 0 here but -fa 1 for baremetal below, deliberately: the Dockerfile
+        # builds llama.cpp straight from the pinned ref and does NOT apply
+        # patches/0001, so this image still has the slow gfx900 FA tile kernel
+        # that costs 57% of prefill. Rebuild the image with the patch and this
+        # branch should follow the baremetal one.
         exec "$SCRIPT_DIR/run-docker-rocm7.sh" \
             "$MODEL" \
             -ngl 99 -c "$CTX" --port "$PORT" --no-warmup \
             -fa 0 \
+            -b "$ROCM_BATCH" -ub "$ROCM_UBATCH" \
             "$@"
         ;;
     --rocm|--rocm7|--baremetal)
         shift
         banner "ROCm 7.2 baremetal (Vega 8, gfx900)"
         free_port
+        # -fa 1: this build carries patches/0001 (v_mad_mix_f32), which makes FA
+        # win prefill and decode at every context. Decode at 32K on the 35B:
+        # 5.9 t/s at -fa 0 against 15.9 at -fa 1. See run-rocm7-baremetal.sh.
         exec "$SCRIPT_DIR/run-rocm7-baremetal.sh" \
             "$MODEL" \
             -ngl 99 -c "$CTX" --port "$PORT" --no-warmup \
-            -fa 0 \
+            -fa 1 \
+            -b "$ROCM_BATCH" -ub "$ROCM_UBATCH" \
             "$@"
         ;;
     --help|-h)
         echo "Usage: $0 [--vulkan|--cpu|--rocm-docker|--rocm|--help]"
         echo ""
-        echo "  (default)       Vulkan / Mesa RADV  — best decode throughput"
-        echo "  --cpu           CPU only            — best prefill at large context"
-        echo "  --rocm-docker   ROCm 7.2 in Docker  — best GPU prefill, self-contained"
-        echo "  --rocm          ROCm 7.2 baremetal  — needs ROCm 7.2 + gfx900 backport on host"
+        echo "  (default)       Vulkan / Mesa RADV  — fastest almost everywhere; start here"
+        echo "  --cpu           CPU only            — fallback; ~half the GPU prefill rate"
+        echo "  --rocm          ROCm 7.2 baremetal  — wins 32k prefill on dense models,"
+        echo "                                        and is the only path that runs gemma"
+        echo "                                        at 32k. Needs the gfx900 backport"
+        echo "                                        plus patches/0001 on the host"
+        echo "  --rocm-docker   ROCm 7.2 in Docker  — self-contained, but the image lacks"
+        echo "                                        patches/0001, so it stays on -fa 0"
         echo ""
-        echo "Env vars: MODEL=  CTX=  PORT="
+        echo "Env vars: MODEL=  CTX=  PORT=  BATCH=  UBATCH="
+        echo ""
+        echo "UBATCH is derived from CTX per backend: a large enough attention dispatch"
+        echo "hangs the Vulkan compute ring, and ROCm tolerates twice the product Vulkan"
+        echo "does. Setting UBATCH= overrides both. See docs/benchmarks.md."
         echo ""
         exit 0
         ;;

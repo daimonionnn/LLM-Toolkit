@@ -17,7 +17,7 @@ re-extracted.
 > beats Vulkan on long-prompt prefill for dense models. The prefill gap figures below
 > were all measured at `-ub 512`. The diagnosis of *why* ROCm trails on the MoE model —
 > emulated dp4a — still stands. See
-> [benchmarks.md](benchmarks.md#current-baseline--2026-09-08--ub-4096).
+> [benchmarks.md](benchmarks.md#the-matrix--2026-09-0809).
 
 Starting point (Qwen3.5-35B-A3B Q4_K_M, `-c 8192`, prefill / decode t/s at ~128/~1K/~4K):
 

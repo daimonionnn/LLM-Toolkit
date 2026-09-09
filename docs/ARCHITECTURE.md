@@ -115,7 +115,7 @@ What this means for tuning the ROCm 7 build:
 
 | Lever | Type | Expected effect on Vega 8 |
 | --- | --- | --- |
-| `-ub` / `-b` ubatch/batch size | runtime | **The largest single knob.** 512 → 4096 is worth +47 % to +85 % prefill on long prompts. Cap it by context: `ctx × ubatch > 2²⁶` hangs the Vulkan compute ring |
+| `-ub` / `-b` ubatch/batch size | runtime | **The largest single knob.** 512 → 4096 is worth +47 % to +85 % prefill on long prompts. Cap it by context: on Vulkan, `ctx × ubatch × head_dim` above ~20e9 hangs the compute ring |
 | `-ctk q8_0` (K-cache quant) | runtime | **Scales with context**: +2.7 % at 1K, +23.5 % at 32K. `-ctv q8_0` needs flash attention, which is usable on ROCm only with the local FA patch |
 | `-fa 1` | runtime | **With the FA patch: best ROCm decode setting** (+141 % at 32K). Without it, or for prefill, use `-fa 0` |
 | `v_mad_mix_f32` for the FA KQ MAC | patch | `patches/0001` — 1 VALU op per MAC instead of 2.5, product in fp32; removes the spilling that came with the old path's intermediates |
@@ -125,7 +125,7 @@ What this means for tuning the ROCm 7 build:
 | `GGML_HIP_ROCWMMA_FATTN`, `GGML_HIP_MMQ_MFMA` | build | **N/A** — require CDNA MFMA units; GCN5 has none |
 | HIP graphs | build | Kept OFF for stability; low cost on a single small device |
 
-See [benchmarks.md — ROCm 7 tuning sweep](benchmarks.md#rocm-72-vega-8-tuning-sweep-2026-06) for measured results.
+See [benchmarks.md — ROCm 7 tuning sweep](benchmarks.md#june-2026-rocm-tuning-sweep) for measured results.
 
 ## Why LM Studio's ROCm Backend Doesn't Work
 

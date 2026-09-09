@@ -99,13 +99,30 @@ amdgpu: [drm] device wedged, but recovered through reset
 ```
 
 **Cause:** a single compute dispatch runs longer than the driver's watchdog. It is *not*
-out of memory. Measured 2026-09-08 on Vulkan: `ctx 32768 × ub 4096` hangs;
-`ctx 16384 × ub 4096` and `ctx 32768 × ub 2048` are fine. Failures track the
-`ctx × ubatch` product crossing roughly 2²⁶.
+out of memory — it happens with tens of GB free. The work in one attention dispatch scales
+with `ctx × ubatch × head_dim`, and that product, not `ctx × ubatch` alone, is what
+predicts the hang. Measured on Vulkan:
+
+| Model | Head dim | ctx | ub | ctx × ub | × head dim | Result |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Qwen3.5-35B-A3B | 256 | 32768 | 2048 | 67.1 M | 17.2e9 | OK (120.1 t/s) |
+| Qwen3.5-35B-A3B | 256 | 32768 | 4096 | 134.2 M | 34.4e9 | **DEVICE LOST** |
+| gemma-4-E4B-it | 512 | 32768 | 2048 | 67.1 M | 34.4e9 | **DEVICE LOST** |
+| gemma-4-E4B-it | 512 | 16384 | 2048 | 33.6 M | 17.2e9 | OK |
+
+The two failures share a product of 34.4e9 and the two passes share 17.2e9, while
+`ctx × ubatch` alone puts a pass and a failure in the same 67.1 M bucket. An earlier
+version of this page blamed `ctx × ubatch > 2²⁶` from the Qwen row only; that rule calls
+the gemma 32K/2048 case safe, and it crashes.
 
 **Fix:** lower the micro-batch. `run/start-llama-server.sh` derives it automatically as
-`min(4096, 2²⁶/CTX)`; if you pass `-ub` yourself, keep the product under that. The GPU
-recovers on its own via a ring reset, but the server process dies.
+`min(4096, 2²⁵/CTX)` — 2²⁵ rather than 2²⁶ because the cap has to hold for the largest
+head dim in use here (512). If you pass `-ub` yourself, keep `ctx × ub × head_dim` under
+about 20e9. The GPU recovers on its own via a ring reset, but the server process dies.
+
+This is a Vulkan limit, not a hardware one: ROCm ran `32768 × 4096` on the 35B fine
+(99.31 t/s prefill). The launcher caps the two backends separately — `2²⁵/CTX` for Vulkan,
+`2²⁶/CTX` for ROCm. See [benchmarks.md](benchmarks.md#the--ub-ceiling-that-hangs-the-gpu).
 
 ### `-ngl 0` does not run on the CPU
 
@@ -124,7 +141,10 @@ generic FA tile kernel compiles — so FA is enabled, and without the local FA p
 the worst setting for prefill. Measured on gemma at a 3330-token prompt:
 `-fa 0` = 112.8 t/s, `-fa 1` = 48.9, **`-fa auto` = 48.9**.
 
-Pass `-fa` explicitly. `run/run-rocm7-baremetal.sh` now defaults to `-fa 0`.
+Pass `-fa` explicitly — always, on every ROCm launch. The right value depends on the
+build, and the `auto` probe cannot tell the difference: `-fa 1` on a build carrying
+`patches/0001`, `-fa 0` on a stock one. `run/run-rocm7-baremetal.sh` (patched) defaults to
+`-fa 1`; `run/run-docker-rocm7.sh` (unpatched image) to `-fa 0`.
 
 
 
