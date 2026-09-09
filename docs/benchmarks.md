@@ -17,36 +17,48 @@ The file is organised by *question*, not by date:
 
 ## The matrix — 2026-09-08/09
 
-`llama-bench -ngl 99 -b 2048 -ub 2048 -r 1`, prefill via `-p <ctx>`, decode via
-`-n 32 -d <ctx>`. ROCm build carries [`patches/0001`](../patches/README.md)
-(`v_mad_mix_f32`). Machine cooled below 55 °C between runs. Raw data:
-[`bench/results/2026-09-08-matrix.tsv`](../bench/results/2026-09-08-matrix.tsv).
+`llama-bench -ngl 99 -r 1`, prefill via `-p <ctx>`, decode via `-n 32 -d <ctx>`. ROCm build
+carries [`patches/0001`](../patches/README.md) (`v_mad_mix_f32`). Machine cooled below
+55 °C between runs. Raw data:
+[2026-09-08 matrix](../bench/results/2026-09-08-matrix.tsv),
+[`-ub` sweep](../bench/results/2026-09-09-ub-sweep.tsv).
 
-`-ub 2048` uniformly, including where a backend could go higher, so every cell in the
-matrix is comparable. The larger micro-batch is worth more on ROCm — see
-[micro-batch](#micro-batch--ub--the-largest-runtime-knob).
-
-### Qwen3.5-35B-A3B Q4_K_M — MoE, 34.7 B total / ~3 B active, head dim 256
-
-| Backend | Prefill 4K | Prefill 16K | Prefill 32K | TG 4K | TG 16K | TG 32K |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **Vulkan `-fa 1`** | **188.5** | 151.5 | **120.1** | **21.2** | **19.2** | **17.1** |
-| Vulkan `-fa 0` | 187.4 | **156.6** | 116.4 | 19.0 | 13.5 | 9.7 |
-| **ROCm `-fa 1`** | 139.3 | 123.7 | 107.9 | 18.8 | 17.5 | 15.9 |
-| ROCm `-fa 0` | 136.5 | 119.3 | 96.6 | 15.2 | 9.4 | 5.9 |
-| CPU `-fa 0` | 83.9 | 71.7 | 59.7 | 16.1 | 13.5 | 11.1 |
-| CPU `-fa 1` | 85.1 | 71.1 | 58.3 | 15.3 | 8.1 | 4.3 |
+Every row is at the micro-batch that backend actually ships, given in its own column —
+ROCm 4096, Vulkan 2048, CPU the 512 default. **TG does not depend on the micro-batch**, so
+those columns are the same whichever `-ub` was used. Why each backend gets the value it
+does, and the full three-value comparison, is in
+[prefill by micro-batch](#prefill-by-micro-batch-both-models-all-three-values).
 
 ### gemma-4-E4B-it Q4_K_M — dense, 7.5 B, head dim 512
 
-| Backend | Prefill 4K | Prefill 16K | Prefill 32K | TG 4K | TG 16K | TG 32K |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **Vulkan `-fa 1`** | **179.4** | **155.1** | — | **17.3** | **15.3** | — |
-| Vulkan `-fa 0` | 166.5 | 150.3 | — | 15.0 | 12.0 | — |
-| **ROCm `-fa 1`** | 160.4 | 145.9 | **131.9** | 15.0 | 13.6 | **12.2** |
-| ROCm `-fa 0` | 153.6 | 138.7 | 121.2 | 12.0 | 9.3 | 7.1 |
-| CPU `-fa 0` | 84.9 | 77.3 | 69.1 | 13.8 | 11.4 | 9.7 |
-| CPU `-fa 1` | 89.4 | 78.0 | 67.1 | 12.6 | 7.9 | 5.3 |
+| Backend | `-ub` | Prefill 4K | Prefill 16K | Prefill 32K | TG 4K | TG 16K | TG 32K |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| **ROCm `-fa 1`** | 4096 | **249.0** | **202.1** | **173.8** | 15.0 | 13.6 | **12.2** |
+| ROCm `-fa 0` | 4096 | 205.3 | 177.3 | 149.5 | 12.0 | 9.3 | 7.1 |
+| **Vulkan `-fa 1`** | 2048 | 179.4 | 155.1 | — | **17.3** | **15.3** | — |
+| Vulkan `-fa 0` | 2048 | 166.5 | 150.3 | — | 15.0 | 12.0 | — |
+| CPU `-fa 0` | 512 | 84.9 | 77.3 | 69.1 | 13.8 | 11.4 | 9.7 |
+| CPU `-fa 1` | 512 | 89.4 | 78.0 | 67.1 | 12.6 | 7.9 | 5.3 |
+
+**ROCm takes the dense model outright** — 30–39 % ahead of Vulkan on prefill at every
+context, and the only backend that runs it at 32K at all. That is the largest single
+result in this file, and it only appears at `-ub 4096`: the same rows at 2048 read
+160 / 146 / 132.
+
+### Qwen3.5-35B-A3B Q4_K_M — MoE, 34.7 B total / ~3 B active, head dim 256
+
+| Backend | `-ub` | Prefill 4K | Prefill 16K | Prefill 32K | TG 4K | TG 16K | TG 32K |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| **Vulkan `-fa 1`** | 2048 | **188.5** | 151.5 | **120.1** | **21.2** | **19.2** | **17.1** |
+| Vulkan `-fa 0` | 2048 | 187.4 | **156.6** | 116.4 | 19.0 | 13.5 | 9.7 |
+| **ROCm `-fa 1`** | 4096 | 151.9 | 130.1 | 112.6 | 18.8 | 17.5 | 15.9 |
+| ROCm `-fa 0` | 4096 | 144.2 | 123.2 | 99.3 | 15.2 | 9.4 | 5.9 |
+| CPU `-fa 0` | 512 | 83.9 | 71.7 | 59.7 | 16.1 | 13.5 | 11.1 |
+| CPU `-fa 1` | 512 | 85.1 | 71.1 | 58.3 | 15.3 | 8.1 | 4.3 |
+
+**Vulkan keeps the MoE model**, prefill and decode both. The larger micro-batch is worth
+only 3–9 % here against 23–55 % on the dense model, so raising it does not close the gap.
+**Backend choice for prefill follows model density.**
 
 > **The four em dashes are a crash, not missing work.** gemma on Vulkan at 32K hangs the
 > GPU compute ring — `ring comp_1.1.1` / `comp_1.0.1 timeout`, `device wedged`, and on the
@@ -59,12 +71,12 @@ matrix is comparable. The larger micro-batch is worth more on ROCm — see
 
 | Question | Answer |
 | --- | --- |
-| Default backend? | **Vulkan `-fa 1`** — fastest at almost every cell, and the only path needing no local patch |
-| 32K prefill on the dense model? | **ROCm `-fa 1`** (131.9). Vulkan cannot run that cell at all |
+| Default backend? | **Vulkan `-fa 1`** — it wins decode everywhere, wins the MoE model outright, and needs no local patch. The exception is prefill on a dense model, below |
+| Prefill on the dense model? | **ROCm `-fa 1` at `-ub 4096`**, at every context — 249 / 202 / 174 t/s against Vulkan's 179 / 155 / crash. Vulkan cannot run 32K on this model at all |
 | `-fa` on ROCm? | **`-fa 1`, always** — with `patches/0001` it wins prefill *and* decode at every context. Without the patch, `-fa 0` |
 | `-fa` on Vulkan? | **`-fa 1`.** One exception: 16K prefill on the 35B, where `-fa 0` is 3 % faster |
 | `-fa` on CPU? | **`-fa 0`.** `-fa 1` costs 61 % of decode at 32K on the 35B, 46 % on gemma |
-| Is ROCm worth it? | Long-context decode is now 8–20 % behind Vulkan, down from 178 %. Vulkan still wins overall |
+| Is ROCm worth it? | **On a dense model, yes** — it wins prefill at every context by 30–39 %. On the MoE it trails Vulkan in both prefill and decode, though long-context decode is now 8–20 % behind rather than 178 % |
 
 Three patterns worth naming:
 
