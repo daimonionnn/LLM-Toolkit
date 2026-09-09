@@ -55,16 +55,38 @@ Prefill = prompt processing, TG = token generation at that KV depth. Raw data:
 > Optimizer disabled, so it is the workload, not the silicon's margins. Do not run
 > that combination. See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
+#### Prefill at each backend's best `-ub` — what the launchers actually run
+
+The two tables above hold `-ub 2048` everywhere so the cells are comparable. That
+under-feeds ROCm badly on the dense model. At the micro-batch each backend ships
+(ROCm 4096, Vulkan capped by context), prefill looks different — measured 2026-09-09,
+[full sweep](docs/benchmarks.md#micro-batch-settled-4096-is-the-optimum-and-the-gain-depends-on-the-model):
+
+| Prefill, `-fa 1` | 4K | 16K | 32K |
+|---|---:|---:|---:|
+| **gemma — ROCm** | **249.0** | **202.1** | **173.8** |
+| gemma — Vulkan | 179.4 | 155.1 | — |
+| 35B — ROCm | 151.9 | 130.1 | 112.6 |
+| **35B — Vulkan** | **198.4** | **157.9** | **120.1** |
+
+**Backend choice for prefill follows model density.** The dense model gains 23–55 % from
+the larger micro-batch and ROCm wins it at every context; the MoE gains 3–9 %, because with
+8 of 256 experts active a 2048 micro-batch already fills MMQ's 64-column tiles, and Vulkan
+keeps that model. Decode is not micro-batch bound, so the decode column of the matrices
+above still stands — **Vulkan wins decode everywhere.**
+
+`-ub 8192` was measured and rejected: it lost on every cell, from −0.4 % to −17.3 %.
+
 ### How to read this
 
 | Question | Answer |
 |---|---|
-| Which backend by default? | **Vulkan `-fa 1`** — fastest at almost every cell, and the only one with no local patch |
-| Fastest 32K prefill on the dense model? | **ROCm `-fa 1`** (131.9) — Vulkan cannot run that cell at all |
+| Which backend by default? | **Vulkan `-fa 1`** — it wins decode everywhere, wins the MoE model outright, and needs no local patch. The exception is prefill on a dense model, below |
+| Fastest prefill on the dense model? | **ROCm `-fa 1` at `-ub 4096`**, at every context — 249 / 202 / 174 t/s against Vulkan's 179 / 155 / crash. Vulkan cannot run 32K on this model at all |
 | Which `-fa` on ROCm? | **`-fa 1`, always.** With `patches/0001` it wins prefill *and* TG at every context. Without the patch, `-fa 0` |
 | Which `-fa` on Vulkan? | **`-fa 1`** — the one exception is 16K prefill on the 35B, where `-fa 0` is 3 % faster |
 | Which `-fa` on CPU? | **`-fa 0`.** `-fa 1` collapses with context — half the speed past 16K |
-| Is ROCm worth it? | For long-context TG the gap to Vulkan is now 8–20 %, down from 178 % before the patch. Vulkan still wins |
+| Is ROCm worth it? | **On a dense model, yes** — it wins prefill at every context by 30–39 %. On the MoE it trails Vulkan in both prefill and decode, though long-context decode is now 8–20 % behind rather than 178 % |
 
 > Full benchmark data in [docs/benchmarks.md](docs/benchmarks.md).
 
@@ -369,9 +391,10 @@ amd-vega-rocm-vulkan-llm-toolkit/
 - [x] **`-ub 4096` adopted, capped by context (2026-09-08)** — worth +47 % to +85 % prefill on long prompts, but a large enough attention dispatch hangs the Vulkan compute ring, so the launcher derives `min(4096, 2²⁵/CTX)`. The threshold tracks `n_kv × ubatch × head_dim` — `n_kv` being the tokens **actually in the KV cache**, not the allocated context. Verified 2026-09-09 by holding the allocation at 128K and varying only the prompt: 6 021 tokens fine, ~16 000 wedges the ring. Allocating a big context is free; filling it is not. The launcher derives from `CTX` because a server must survive a full-context prompt
 - [x] **`-ctk q8_0` adopted for long context (2026-09-08)** — +2.7 % at 1K but **+23.5 % at 32K**; June's "+3.5 %, small" was measured only at 4K
 - [x] **Clock pinning dropped (2026-09-08)** — no effect now that the cooling fix stopped the throttling that made it look useful in June
-- [ ] **Prefill matrix at `-ub 4096`** — the 2026-09-08 matrix uses `-ub 2048` uniformly so every cell is comparable; this one shows what the larger micro-batch buys. Prefill only, since decode is not micro-batch bound and the existing numbers carry over. **Leave Vulkan @ 32K as an em dash, not a substituted `-ub 2048` figure** — that cell is a crash (the attention dispatch exceeds the Vulkan compute ring's watchdog), and filling it from a different configuration would put two meanings in one table. Worth re-running that one case first to confirm it still fails: it was observed once, and if it turns out to be intermittent the launcher's derived cap needs revisiting rather than a footnote
-- [x] **`-ub` cap split per backend (2026-09-09)** — the derived `min(4096, 2²⁵/CTX)` came from Vulkan crashes. ROCm ran that exact product fine (99.31 t/s), so the threshold is a property of Vulkan's dispatch shape, not of the hardware, and applying it to ROCm was throttling that backend for nothing. `start-llama-server.sh` now derives a cap per backend: `2²⁵/CTX` for Vulkan, `2²⁶/CTX` for ROCm — twice Vulkan's, and the largest product any ROCm run has actually demonstrated (34.4e9, reached from both directions). Not a flat `-ub 4096`, which would put gemma at 32K on 68.7e9, double anything measured on either backend. ROCm's real ceiling is still unmeasured — the open `-ub 8192` probe below would find it
-- [ ] **Probe `-ub 8192` on ROCm at 16K and 32K prompts** — prefill was still climbing at 4096 (32K prompt: 67.38 → 99.31 from `-ub` 512 → 4096), so the "ubatch ≥ prompt length" rule has not been shown to saturate. Memory fits: `32768 × 8192 × 16 heads × 4 B` = 17.2 GB of KQ plus 20 GB of weights against 42 GB free. Watch `dmesg` for ring resets. Not worth testing on Vulkan — there `-ub 8192` is only safe to 8K context, where a prompt is at most 8192 tokens and `-ub 4096` already covers most of it
+- [x] **Prefill matrix at `-ub 4096` (2026-09-09)** — 26 cells, 25 completed, zero ring resets. The gain turns out to be a property of the model, not the context: dense +23–55 % at every context and both FA settings, MoE +3–9 %. That inverts the dense-model prefill recommendation — ROCm now wins gemma at 4K, 16K and 32K. Vulkan at `-fa 0` *regresses* ~8 % with the larger micro-batch, in two independent cells. Raw data in [bench/results/2026-09-09-ub-sweep.tsv](bench/results/2026-09-09-ub-sweep.tsv)
+- [x] **`-ub` cap split per backend (2026-09-09)** — the derived cap came from Vulkan crashes, and ROCm ran the exact product that kills Vulkan at 99.31 t/s. `start-llama-server.sh` now derives `min(4096, 2²⁵/CTX)` for Vulkan only; **ROCm gets a flat `-ub 4096`**, which the sweep the same day showed is both the optimum and far inside safe territory (it ran 8× that product without a ring reset)
+- [x] **`-ub 8192` probed and rejected (2026-09-09)** — a loss on every cell that ran: 35B −0.4 to −4.9 %, gemma −6.3 to −17.3 %, and the 35B at 32K/`-fa 0` would not run at all. The premise ("prefill was still climbing at 4096") came from a pre-patch `-fa 0` sweep; the climb does not continue. **`-ub 4096` is the optimum — do not raise it.** The run also settled ROCm's watchdog headroom: gemma at 32K with `-ub 8192` is `n_kv × ub × head` = 137e9, eight times the product that reliably kills Vulkan, and it ran clean
+- [ ] **Confirm the Vulkan `-fa 0` micro-batch regression at `-r 3`** — raising `-ub` from 2048 to 4096 *cost* Vulkan about 8 % in two independent cells (35B at 16K: 156.6 → 144.1; gemma at 4K: 166.5 → 152.0), while every `-fa 1` cell was flat or positive. The mechanism is plausible — without FA the KQ intermediate is `n_kv × n_ubatch`, so a bigger micro-batch doubles it — but two cells at `-r 1` is thin evidence for an 8 % effect. If it holds, Vulkan's cap should stay at 2048 when `-fa 0` is in play
 - [ ] **Send `patches/0001` upstream** — it fixes the whole GCN5 class, not just this box
 - [ ] **Explain ROCm's gain from the BIOS retune** — per-phase sampling shows **ROCm never uses the BIOS carve-out** (VRAM ~300 MB, whole model in GTT) on both gemma and the 35B, so the carve-out cannot be the cause. An earlier commit claimed it was, from a whole-run VRAM peak that actually belonged to the Vulkan phase; corrected in [benchmarks.md](docs/benchmarks.md). The real cause is unidentified — four other settings changed at once
 - [ ] **Repaste the CPU** — peak is 86.6 °C on a 65 W APU. Not throttling, but the throttle limit is now set to 99 °C, above the 95 °C stock Tjmax, so the usual safety margin is gone

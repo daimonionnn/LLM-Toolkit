@@ -190,6 +190,85 @@ Every launcher was leaving this on the table — `run/start-llama-server.sh`, th
 default path this repo recommends, set no batch flags at all and so ran 42 % below its own
 capability at 4K.
 
+### Micro-batch, settled: 4096 is the optimum and the gain depends on the model
+
+The sweep above stops at 4096 and was measured before `patches/0001`. This one
+re-measures at each context with the patched build and adds 8192, prefill only
+(`llama-bench -p <ctx> -n 0 -r 1`, raw data:
+[`bench/results/2026-09-09-ub-sweep.tsv`](../bench/results/2026-09-09-ub-sweep.tsv)).
+26 cells, 25 completed, **zero ring resets**.
+
+#### `-ub 4096` against the matrix's `-ub 2048`
+
+| Model | Backend | FA | 4K | 16K | 32K |
+| --- | --- | --- | ---: | ---: | ---: |
+| **gemma** | ROCm | `1` | **249.0** (+55 %) | **202.1** (+39 %) | **173.8** (+32 %) |
+| gemma | ROCm | `0` | 205.3 (+34 %) | 177.3 (+28 %) | 149.5 (+23 %) |
+| 35B | ROCm | `1` | 151.9 (+9 %) | 130.1 (+5 %) | 112.6 (+4 %) |
+| 35B | ROCm | `0` | 144.2 (+6 %) | 123.2 (+3 %) | 99.3 (+3 %) |
+| 35B | Vulkan | `1` | 198.4 (+5 %) | 157.9 (+4 %) | crash |
+| 35B | Vulkan | `0` | 191.9 (+2 %) | **144.1 (−8 %)** | crash |
+| gemma | Vulkan | `1` | 177.1 (−1 %) | crash | crash |
+| gemma | Vulkan | `0` | **152.0 (−9 %)** | crash | crash |
+
+**The gain is a property of the model, not the context.** The dense model gains 23–55 %
+at every context and both FA settings; the MoE gains 3–9 %. That is the tile-fill argument
+reaching its limit: with 8 of 256 experts active, each expert sees `ub × 8/256` tokens, so
+`-ub 2048` already puts 64 columns on each one — exactly MMQ's tile width. Nothing above it
+can help. A dense model has no such cutoff: every token passes through every weight, so
+doubling the micro-batch keeps doubling the columns per weight fetch. The older sweep shows
+the same thing from the other side — on the 35B, `-ub` 512 → 2048 was worth +55 % and
+2048 → 4096 only +10 %.
+
+**Vulkan regresses with `-ub 4096` at `-fa 0`.** Two independent cells, different models
+and contexts, both about −8 %, while every `-fa 1` cell is flat or positive. Mechanically
+consistent: without flash attention the KQ intermediate is `n_kv × n_ubatch`, so a larger
+micro-batch doubles it; with `-fa 1` it is never materialised. Two cells at `-r 1` is thin
+evidence for a −8 % effect — it needs a repeat at `-r 3` before it is more than a caution.
+
+#### `-ub 8192`: uniformly worse, question closed
+
+| Model | FA | 16K | 32K |
+| --- | --- | ---: | ---: |
+| 35B | `1` | 129.6 (−0.4 %) | 109.7 (−2.6 %) |
+| 35B | `0` | 117.2 (−4.9 %) | **failed to run** |
+| gemma | `1` | 184.8 (−8.6 %) | 162.9 (−6.3 %) |
+| gemma | `0` | 146.7 (−17.3 %) | 127.0 (−15.1 %) |
+
+Percentages against `-ub 4096`. Every cell is a loss, and the losses are largest exactly
+where the KQ intermediate is largest (`-fa 0`, long context). **`-ub 4096` is the optimum;
+do not raise it.**
+
+The one cell that did not run is an ordinary out-of-memory, not a watchdog hang — `dmesg`
+was clean and the backtrace goes `ggml_cuda_pool_leg::alloc` → `ggml_cuda_error` →
+`ggml_abort`. At `-fa 0` the KQ intermediate is materialised as
+`n_kv × n_ubatch × n_head × 4 B`, and the 35B has 16 heads:
+
+```
+32768 × 8192 × 16 × 4 = 17,179,869,184 B = 16 GiB
+```
+
+one contiguous allocation, on top of ~20 GB of weights and the KV cache. At `-ub 4096` the
+same buffer is 8 GiB and the cell runs. This is arithmetic, not a hardware limit: it is the
+`-fa 0` KQ term, which is why `-fa 1` — where KQ is never materialised — completed both
+32K cells at `-ub 8192`. This closes an open question that expected headroom above 4096 because
+prefill was still climbing there on the 35B — it was climbing at `-fa 0` pre-patch, and the
+climb does not continue.
+
+#### ROCm has no ring-hang ceiling anywhere near Vulkan's
+
+The riskiest cell — gemma at 32K with `-ub 8192`, `n_kv × ub × head` = **137e9** — ran
+clean. That is 4× the largest product ROCm had previously demonstrated and **8× the value
+that reliably kills Vulkan**. Across all 26 cells `dmesg` recorded not one ring timeout.
+
+So the two backends are not merely differently tuned here, they are differently bounded:
+the watchdog limit is a property of Vulkan's dispatch shape and does not describe the
+hardware. `run/start-llama-server.sh` accordingly gives ROCm a flat `-ub 4096` — the
+measured optimum, and now well inside demonstrated-safe territory — while Vulkan keeps its
+context-derived cap.
+
+---
+
 ### The `-ub` ceiling that hangs the GPU
 
 `llama-bench -p 32768 -ub 4096 -fa 1` on Vulkan produces

@@ -81,17 +81,19 @@ CTX="${CTX:-8192}"
 # if you know your model's head dimension, and lower it if dmesg shows a ring
 # reset. Guessing high here costs a frozen desktop, guessing low costs prefill.
 #
-# The 2^25 cap is Vulkan's, and only Vulkan's. ROCm ran the exact product that
-# kills Vulkan — 32768 x 4096 x 256 = 34.4e9 on the 35B — at 99.31 t/s prefill,
-# so the limit is a property of Vulkan's dispatch shape, not of the hardware.
-# ROCm therefore gets its own cap, at 2^26: twice Vulkan's, and the largest value
-# any ROCm run has actually demonstrated (34.4e9, reached from both directions —
-# 35B at 32768x4096x256, gemma at 32768x2048x512).
+# The 2^25 cap is Vulkan's, and only Vulkan's. ROCm gets a flat -ub 4096 at every
+# context, for two measured reasons (2026-09-09 sweep, 26 cells, zero ring resets):
 #
-# Not a flat -ub 4096, tempting as that is. That would put gemma at 32k on
-# 32768 x 4096 x 512 = 68.7e9, double anything measured on either backend, and
-# the point of this whole block is that an unvalidated guess here costs a frozen
-# desktop. Probing ROCm's real ceiling is open work — see the README TODO.
+#   1. 4096 is the optimum. Raising it to 8192 lost on every cell that ran —
+#      35B −0.4 to −4.9 %, gemma −6.3 to −17.3 % — and the 35B at 32k/-fa 0/8192
+#      would not run at all. Lowering it to 2048 costs the dense model 23-55 %.
+#   2. ROCm is nowhere near a watchdog limit. The riskiest cell, gemma at 32k with
+#      -ub 8192, is n_kv*ub*head = 137e9 and ran clean — 8x the product that
+#      reliably kills Vulkan. The ceiling is Vulkan's dispatch shape, not silicon.
+#
+# An earlier version of this block derived a 2^26/CTX cap for ROCm because a flat
+# 4096 was then unvalidated at gemma/32k. The sweep validated it with room to
+# spare, so the derivation is gone.
 BATCH="${BATCH:-4096}"
 UBATCH_SET=1
 if [ -z "${UBATCH:-}" ]; then
@@ -102,13 +104,11 @@ if [ -z "${UBATCH:-}" ]; then
 fi
 [ "$BATCH" -lt "$UBATCH" ] && BATCH="$UBATCH"
 
-# ROCm's own batch flags: the derived cap above unless you asked for one.
+# ROCm's own batch flags: a flat 4096 unless you asked for something else.
 ROCM_UBATCH="$UBATCH"
 ROCM_BATCH="$BATCH"
 if [ "$UBATCH_SET" -eq 0 ]; then
-    ROCM_UBATCH=$(( 67108864 / CTX ))
-    [ "$ROCM_UBATCH" -gt 4096 ] && ROCM_UBATCH=4096
-    [ "$ROCM_UBATCH" -lt 512 ]  && ROCM_UBATCH=512
+    ROCM_UBATCH=4096
     [ "$ROCM_BATCH" -lt "$ROCM_UBATCH" ] && ROCM_BATCH="$ROCM_UBATCH"
 fi
 

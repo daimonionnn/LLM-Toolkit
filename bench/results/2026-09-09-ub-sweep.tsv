@@ -1,0 +1,32 @@
+# Prefill sweep at -ub 4096 / 8192, 2026-09-09. llama-bench -ngl 99 -p <ctx> -n 0 -r 1.
+# ROCm build carries patches/0001. Prefill only: decode is not micro-batch bound.
+# Vulkan runs only cells below its known n_kv*ub*head ceiling (~20e9); the rest are
+# established crashes and are not re-run. -ub 8192 is skipped at ctx 4096, where the
+# micro-batch is clamped to the prompt length and the cell would duplicate -ub 4096.
+model	backend	fa	context	ubatch	prefill_t_per_s	seconds	status
+35B	ROCm	1	4096	4096	151.94	96	ok
+35B	ROCm	1	16384	4096	130.11	261	ok
+35B	ROCm	1	32768	4096	112.64	592	ok
+35B	ROCm	0	4096	4096	144.23	67	ok
+35B	ROCm	0	16384	4096	123.16	277	ok
+35B	ROCm	0	32768	4096	99.31	696	ok
+gemma	ROCm	1	4096	4096	249.00	46	ok
+gemma	ROCm	1	16384	4096	202.13	166	ok
+gemma	ROCm	1	32768	4096	173.81	380	ok
+gemma	ROCm	0	4096	4096	205.27	44	ok
+gemma	ROCm	0	16384	4096	177.33	188	ok
+gemma	ROCm	0	32768	4096	149.52	443	ok
+35B	Vulkan	1	4096	4096	198.35	77	ok
+35B	Vulkan	1	16384	4096	157.88	211	ok
+35B	Vulkan	0	4096	4096	191.86	46	ok
+35B	Vulkan	0	16384	4096	144.12	233	ok
+gemma	Vulkan	1	4096	4096	177.05	49	ok
+gemma	Vulkan	0	4096	4096	152.03	55	ok
+35B	ROCm	1	16384	8192	129.63	284	ok
+35B	ROCm	1	32768	8192	109.70	625	ok
+35B	ROCm	0	16384	8192	117.18	309	ok
+35B	ROCm	0	32768	8192	-	197	OOM (ggml_cuda_pool_leg::alloc; KQ = 32768*8192*16*4 = 16 GiB in one allocation; dmesg clean, no ring reset)
+gemma	ROCm	1	16384	8192	184.77	192	ok
+gemma	ROCm	1	32768	8192	162.87	406	ok
+gemma	ROCm	0	16384	8192	146.74	228	ok
+gemma	ROCm	0	32768	8192	126.96	521	ok
