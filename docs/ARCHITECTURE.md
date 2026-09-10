@@ -117,7 +117,7 @@ repo to verify it.
 | **rocBLAS** | Works **with the backport** | Ships prebuilt per-arch kernels; copy the gfx900 files from ROCm 6.3.4. Validated against `amdrocm-blas7.14-gfx1030` 7.14.1-0 |
 | **rocFFT** | **Works, no backport needed** | JIT-compiled through comgr/clang rather than shipping per-arch binaries |
 | **MIOpen** | **Works, no backport needed** | Same — JIT-compiled |
-| **rocRAND** | **Blocked** | Device kernels ship in a proprietary `.kpack` container (custom header + zstd payload), not loose files, so the copy trick does not apply |
+| **rocRAND** | **Blocked** under modular packaging — but see below, it works from the PyTorch wheel | Device kernels ship in a proprietary `.kpack` container (custom header + zstd payload), not loose files, so the copy trick does not apply |
 | **RCCL** | **Blocked** | Same `.kpack` packaging |
 | **rocSPARSE** | **Blocked** | gfx900 is hardcoded as a rejected architecture inside the compiled library, independent of any kernel files |
 
@@ -172,6 +172,16 @@ and rocSPARSE all ship gfx900 device code in 6.3.4 and none of them do in 7.2; M
 JIT-compiles and does not care either way. So the whole backporting question — the thing
 this repo is largely *about* — simply does not arise on 6.3.4. It arises here only because
 llama.cpp is wanted on ROCm 7, for reasons that have nothing to do with PyTorch.
+
+**PyTorch works, and rocRAND was never the wall it looked like.** Verified on this iGPU
+2026-09-10 with `torch 2.7.0+rocm6.3`: rocBLAS fp32 and fp16 matmul, rocRAND uniform RNG
+and MIOpen conv2d all produce numerically correct results, at 1.40 TFLOP/s fp32 — roughly
+57 % of this iGPU's theoretical peak. Results:
+[`bench/results/2026-09-10-pytorch-gfx900-smoke.txt`](../bench/results/2026-09-10-pytorch-gfx900-smoke.txt);
+run it with [`run/run-pytorch-rocm63.sh`](../run/run-pytorch-rocm63.sh). The wheel bundles
+its own gfx900 rocBLAS, rocRAND and MIOpen, so the `.kpack` packaging problem of modular ROCm
+never arises and no backport is involved — `HSA_OVERRIDE_GFX_VERSION=9.0.0` is the whole
+trick.
 
 **Do not try to carry rocRAND into ROCm 7.** It looks tempting, because unlike rocBLAS's
 loose Tensile files the whole library is one `.so` and the 6.3.4 one has gfx900 in it. But
