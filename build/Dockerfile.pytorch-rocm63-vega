@@ -17,7 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ARG TORCH_VERSION=2.7.0+rocm6.3
 RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/rocm6.3 \
-        "torch==${TORCH_VERSION}"
+        "torch==${TORCH_VERSION}" && \
+    pip install --no-cache-dir numpy
 
 # gfx90c is ISA-identical to gfx900; the override makes the runtime load the
 # gfx900 kernels. SDMA and XNACK are both disabled -- XNACK=1 hard-freezes this
@@ -26,6 +27,12 @@ ENV HSA_OVERRIDE_GFX_VERSION=9.0.0 \
     HSA_ENABLE_SDMA=0 \
     HSA_XNACK=0 \
     PYTORCH_ROCM_ARCH=gfx900
+
+# NOTE for anyone writing their own `docker run`: pass the render and video
+# groups by NUMERIC gid, not by name. This image is Debian slim and has no
+# `render` group, so `--group-add=render` fails before the container starts,
+# with the process dying instantly and no output at all. Use
+# run/run-pytorch-rocm63.sh, which looks the ids up on the host.
 
 COPY build/pytorch-smoke.py /opt/pytorch-smoke.py
 ENTRYPOINT ["python3", "/opt/pytorch-smoke.py"]

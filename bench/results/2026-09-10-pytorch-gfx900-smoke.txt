@@ -1,0 +1,32 @@
+PyTorch on the Vega 8 iGPU (gfx90c via gfx900), 2026-09-10.
+Image: build/Dockerfile.pytorch-rocm63-vega, torch 2.7.0+rocm6.3, HIP 6.3.42131.
+Command: run/run-pytorch-rocm63.sh
+
+torch 2.7.0+rocm6.3, HIP 6.3.42131-fa1d09cbd
+device: AMD Radeon Graphics  arch=gfx900:xnack-  CUs=8  mem=64.0 GiB
+  PASS  rocBLAS  fp32 matmul 1024^3  — max abs err 2.44e-04
+  PASS  rocBLAS  fp16 matmul 1024^3  — max abs err 8.11e-02 (fp16 accum)
+  PASS  rocRAND  uniform 2^20  — mean=0.5001 std=0.2884 (expect 0.5 / 0.289)
+  PASS  MIOpen   conv2d 8x16x64x64  — max abs err 3.43e-05
+
+  fp32 sgemm 2048^3: 12.2 ms/iter = 1.40 TFLOP/s
+
+ALL CHECKS PASSED
+
+Notes
+-----
+Every check compares against a CPU reference or a known distribution rather
+than testing for the absence of an exception: a kernel that silently returned
+zeros would pass a "did it crash" test.
+
+1.40 TFLOP/s is about 57% of this iGPU's theoretical fp32 peak
+(8 CU x 64 lanes x 2 flop x 2.4 GHz = 2.46 TFLOP/s).
+
+rocRAND passing is the notable one. Issue #1 reported it as blocked on gfx900
+under modular ROCm 7.14.1, where its kernels ship inside a .kpack container.
+The torch 2.7.0+rocm6.3 wheel bundles its own rocRAND with gfx900 code, so the
+packaging question never arises.
+
+No Tensile backport and no source build were involved. The requirements are
+the stock wheel, HSA_OVERRIDE_GFX_VERSION=9.0.0, and passing the render/video
+groups by numeric gid (see run/run-pytorch-rocm63.sh).
