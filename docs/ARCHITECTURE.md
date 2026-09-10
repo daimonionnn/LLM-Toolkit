@@ -98,6 +98,56 @@ The "c" suffix indicates an APU variant with:
 
 The ISA (instruction set architecture) is identical between gfx900 and gfx90c. Code compiled for gfx900 runs on gfx90c. This is why `HSA_OVERRIDE_GFX_VERSION=9.0.0` works — it tells the ROCm runtime "treat this as gfx900" and the kernels execute correctly.
 
+## ROCm library support on gfx900 — what needs backporting and what does not
+
+llama.cpp needs one ROCm library: **rocBLAS**, for the prefill GEMMs. That one ships
+prebuilt per-architecture kernels, modern packages drop gfx9, and this repo's central
+technique is copying the gfx900 kernels plus `TensileLibrary_lazy_gfx900.dat` out of the
+ROCm 6.3.4 package. Everything below is about the *rest* of the stack — which matters only
+if you want PyTorch, ComfyUI or vLLM on this hardware, not for inference through llama.cpp.
+
+**The following is a third-party report, not measured here.** It comes from
+[issue #1](https://github.com/daimonionnn/amd-vega-rocm-vulkan-llm-toolkit/issues/1) by
+**@Josephur**, who ran it on two discrete Vega10 dies (Radeon Pro V340, the same silicon as
+Instinct MI25) under modular ROCm `amdrocm*7.14.1`. No discrete Vega is available in this
+repo to verify it.
+
+| Library | Status on gfx900 | Why |
+| --- | --- | --- |
+| **rocBLAS** | Works **with the backport** | Ships prebuilt per-arch kernels; copy the gfx900 files from ROCm 6.3.4. Validated against `amdrocm-blas7.14-gfx1030` 7.14.1-0 |
+| **rocFFT** | **Works, no backport needed** | JIT-compiled through comgr/clang rather than shipping per-arch binaries |
+| **MIOpen** | **Works, no backport needed** | Same — JIT-compiled |
+| **rocRAND** | **Blocked** | Device kernels ship in a proprietary `.kpack` container (custom header + zstd payload), not loose files, so the copy trick does not apply |
+| **RCCL** | **Blocked** | Same `.kpack` packaging |
+| **rocSPARSE** | **Blocked** | gfx900 is hardcoded as a rejected architecture inside the compiled library, independent of any kernel files |
+
+Two things follow that are worth stating plainly.
+
+**MIOpen needing no backport is the significant one.** MIOpen is the convolution library
+PyTorch uses on ROCm. The reasonable assumption from this repo's rocBLAS experience was
+that the whole ML stack hits the same prebuilt-kernel wall; it does not. That makes
+PyTorch and ComfyUI on gfx900 more tractable than these docs previously implied.
+
+**rocRAND is the wall to plan around.** PyTorch uses it for GPU-side random number
+generation, so it is not optional for training and is needed by plenty of inference paths.
+Under modular packaging its kernels are inside `.kpack`, which would need the format
+reverse-engineered. Anyone attempting a PyTorch stack here should establish whether
+rocRAND can be satisfied *before* investing in the rest.
+
+**The backport is not APU-specific.** The same report confirms it on discrete Vega10 with
+correctness checked rather than assumed — 1024×1024 and 4096×4096 SGEMM numerically
+correct, ~7 TFLOPS FP32 sustained on one die. This repo documents the technique on a
+gfx90c APU, which needs `HSA_OVERRIDE_GFX_VERSION=9.0.0`; native gfx900 hardware needs no
+override, and the file copy is the whole of it.
+
+That last point does **not** unblock [running this repo's baremetal path under modular
+ROCm](#rocm-software-stack-on-ubuntu-2510). Two preconditions failed there in June 2026:
+the modular runtime rejected the override with `HSA_STATUS_ERROR_OUT_OF_RESOURCES`, *and*
+no gfx9 kernels shipped. The report resolves the second on a card that never needed the
+first. It does suggest the modular runtime is not fundamentally hostile to gfx9 — it ran
+gfx900 kernels fine — which moves suspicion onto the override rejection as a separate
+cause, but that is a hypothesis and testing it would mean dismantling a working install.
+
 ## Performance ceiling and tuning levers (gfx900 / Vega 8)
 
 Two hardware facts bound what any amount of build/flag tuning can achieve on this iGPU:
@@ -497,6 +547,13 @@ Discrete Vega 56/64 use the **same gfx900 target** as this project already build
 - **PyTorch** — 8 GB HBM2 is enough for fine-tuning small models (7B at INT4), inference, and many computer vision tasks. [mixa3607/ML-gfx906](https://github.com/mixa3607/ML-gfx906) already provides working PyTorch images for gfx906.
 - **ComfyUI** — Stable Diffusion inference (SD1.5, SDXL with `--lowvram`) is feasible on 8 GB HBM2. FLUX.1-dev needs 16 GB (Radeon VII / MI50). [mixa3607/ML-gfx906](https://github.com/mixa3607/ML-gfx906) has ComfyUI Docker images too.
 - **vLLM** — Requires PyTorch; feasible for 7B models on 8 GB, larger quantized models on 16 GB.
+
+**What the library survey changes here.** [Issue #1](https://github.com/daimonionnn/amd-vega-rocm-vulkan-llm-toolkit/issues/1)
+reports MIOpen and rocFFT working on gfx900 with no backport at all, and the rocBLAS
+backport confirmed on discrete Vega10 with numerically verified SGEMM. So the two
+libraries PyTorch leans on hardest for compute are either free or already solved. The
+blocker to establish first is **rocRAND** — `.kpack`-packaged under modular ROCm, and
+needed for GPU-side RNG. See [ROCm library support on gfx900](#rocm-library-support-on-gfx900--what-needs-backporting-and-what-does-not).
 
 **For contributors with Vega 56/64 hardware:**
 
