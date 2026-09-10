@@ -121,18 +121,62 @@ repo to verify it.
 | **RCCL** | **Blocked** | Same `.kpack` packaging |
 | **rocSPARSE** | **Blocked** | gfx900 is hardcoded as a rejected architecture inside the compiled library, independent of any kernel files |
 
+### Verified here: the dividing line is the ROCm version, not the library
+
+The report above is about **modular** ROCm 7.14.1. This repo installs **classic** packages,
+so the same question was asked of those — by downloading each `.deb` and reading the
+embedded code-object targets out of the shared library:
+
+```bash
+dpkg-deb -x rocrand_*.deb ext/
+strings -a ext/opt/rocm-*/lib/librocrand.so.* | grep -oE 'amdgcn-amd-amdhsa--gfx[0-9a-z:+-]+'
+```
+
+| Library | ROCm 6.3.4 | ROCm 7.2.0 classic |
+| --- | --- | --- |
+| rocBLAS | **gfx900, gfx906** | none — CDNA only (gfx908/90a/942/950) |
+| rocRAND | **gfx900, gfx906** | none — CDNA only |
+| rocFFT | **gfx900, gfx906** | none |
+| rocSPARSE | **gfx900, gfx906** | none |
+
+Raw data:
+[`bench/results/2026-09-10-rocm-gfx900-library-survey.tsv`](../bench/results/2026-09-10-rocm-gfx900-library-survey.tsv).
+This says what device code is **present in the package**; none of these libraries were
+executed, so it is a necessary condition, not a demonstration that they work.
+
+**ROCm 6.3.4 is the last version that compiles consumer gfx9 across the board, and 7.x
+dropped it everywhere at once.** That reframes the problem. The Tensile backport in this
+repo exists because llama.cpp is wanted on ROCm 7; it is not a general gfx900 fix. For an
+ML stack there is a much simpler answer: **build on ROCm 6.3.4, where nothing needs
+backporting at all.**
+
+Three details refine — rather than contradict — the modular-packaging report above, and
+they matter because they point at different remedies:
+
+- **No `.kpack` in classic packaging.** Classic rocRAND is a single `librocrand.so`
+  with device code embedded as a fat binary. The wall here is not a container format to
+  reverse-engineer; it is that consumer gfx9 was simply not compiled in. Swapping in the
+  6.3.4 `.so` is one file — but it needs `libamdhip64.so.6`, so it only works inside a
+  ROCm 6 environment, which is another reason to build the whole stack on 6.3.4.
+- **rocFFT does ship prebuilt gfx900 kernels** in 6.3.4, so it is not purely JIT. Both
+  observations can hold: a JIT path may exist alongside the shipped code objects, which
+  would explain why it ran on modular 7.14.1 with no backport.
+- **rocSPARSE's hardcoded gfx900 rejection came after 6.3.4** — that version ships gfx900
+  and gfx906 device code. So the rejection is a later deliberate removal, not a permanent
+  property of the library.
+
 Two things follow that are worth stating plainly.
 
-**MIOpen needing no backport is the significant one.** MIOpen is the convolution library
-PyTorch uses on ROCm. The reasonable assumption from this repo's rocBLAS experience was
-that the whole ML stack hits the same prebuilt-kernel wall; it does not. That makes
-PyTorch and ComfyUI on gfx900 more tractable than these docs previously implied.
+**For an ML stack on gfx900, target ROCm 6.3.4 and stop there.** rocBLAS, rocRAND, rocFFT
+and rocSPARSE all ship gfx900 device code in 6.3.4 and none of them do in 7.2; MIOpen
+JIT-compiles and does not care either way. So the whole backporting question — the thing
+this repo is largely *about* — simply does not arise on 6.3.4. It arises here only because
+llama.cpp is wanted on ROCm 7, for reasons that have nothing to do with PyTorch.
 
-**rocRAND is the wall to plan around.** PyTorch uses it for GPU-side random number
-generation, so it is not optional for training and is needed by plenty of inference paths.
-Under modular packaging its kernels are inside `.kpack`, which would need the format
-reverse-engineered. Anyone attempting a PyTorch stack here should establish whether
-rocRAND can be satisfied *before* investing in the rest.
+**Do not try to carry rocRAND into ROCm 7.** It looks tempting, because unlike rocBLAS's
+loose Tensile files the whole library is one `.so` and the 6.3.4 one has gfx900 in it. But
+it links `libamdhip64.so.6` against ROCm 7's `.so.7`, so it needs a ROCm 6 runtime anyway —
+at which point building the stack on 6.3.4 is the same work with none of the risk.
 
 **The backport is not APU-specific.** The same report confirms it on discrete Vega10 with
 correctness checked rather than assumed — 1024×1024 and 4096×4096 SGEMM numerically

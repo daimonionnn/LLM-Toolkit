@@ -1,0 +1,24 @@
+# Which ROCm libraries still ship gfx900 device code, 2026-09-10.
+#
+# Method: download the .deb, dpkg-deb -x, then read the embedded code-object
+# target strings out of the shared library:
+#   strings -a lib<name>.so.* | grep -oE 'amdgcn-amd-amdhsa--gfx[0-9a-z:+-]+'
+# This says what device code is PRESENT in the package. It does NOT say the
+# library runs correctly on that hardware -- none of these were executed.
+#
+# Prompted by issue #1 (@Josephur), who surveyed the same libraries under
+# MODULAR ROCm 7.14.1 on native gfx900. This survey is CLASSIC packaging,
+# which is what this repo installs, and finds different mechanisms -- see
+# docs/ARCHITECTURE.md.
+#
+# gfx9_consumer = gfx900/gfx906/gfx90c only; CDNA (gfx908/90a/942/950) excluded,
+# since those are MI-series and irrelevant to Vega.
+library	rocm_version	gfx9_consumer	all_gfx9_present	note
+rocblas	6.3.4	yes	gfx900 gfx906	the source of this repo's Tensile backport
+rocblas	7.2.0	no	gfx908 gfx90a gfx942 gfx950	ships loose Tensile files; backport works by copying them
+rocrand	6.3.4	yes	gfx900 gfx906:xnack- gfx908:xnack- gfx90a gfx942	device code embedded in the .so, no loose kernel files
+rocrand	7.2.0	no	gfx908 gfx90a:xnack-/+ gfx942:xnack-/+ gfx950	no .kpack in classic packaging, unlike the modular 7.14.1 of issue #1
+rocfft	6.3.4	yes	gfx900 gfx906	contradicts nothing in issue #1: it may also have a JIT path
+rocfft	7.2.0	no	-	-
+rocsparse	6.3.4	yes	gfx900 gfx906:xnack-	so the hardcoded rejection reported in issue #1 came later than 6.3.4
+rocsparse	7.2.0	no	-	-
