@@ -1,0 +1,65 @@
+# llama.cpp against AMD's own ROCm 7.14 build for gfx900.
+#
+# Why this exists: every other ROCm path in this repo works by backporting
+# gfx900 Tensile kernels out of the ROCm 6.3.4 package, because AMD's classic
+# 7.2 packages ship no consumer gfx9 at all. But AMD publishes a complete
+# ROCm 7.14 built FOR gfx900 as pip wheels, with 182 Tensile files. If
+# llama.cpp builds against that, the backport becomes unnecessary.
+#
+# The kernels cannot simply be dropped into a 7.2 install: the Tensile format
+# changed between 7.2 and 7.14 (7.2 keeps the files flat in rocblas/library/,
+# 7.14 puts them in a per-architecture subdirectory), and mixing them aborts
+# with a ROCm error at the first GEMM. Tested 2026-09-10. Hence a full build
+# against the SDK rather than a file copy.
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git cmake ninja-build build-essential libgomp1 libnuma-dev \
+        libcurl4-openssl-dev ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# rocm[libraries,devel] pulls the runtime, the gfx900 libraries and the headers
+# plus the rocm-sdk CLI, which reports the paths cmake needs.
+ARG ROCM_SDK_INDEX=https://rocm.nightlies.amd.com/v2/gfx900/
+RUN pip install --no-cache-dir --index-url "${ROCM_SDK_INDEX}" "rocm[libraries,devel]" && \
+    rocm-sdk targets && rocm-sdk path --root
+
+WORKDIR /app
+ARG LLAMA_CPP_REF=465e49b9cea78a68b9c244ffb48d0ee24a82873d
+RUN git init -q . && \
+    git remote add origin https://github.com/ggml-org/llama.cpp.git && \
+    git fetch --depth 1 origin "$LLAMA_CPP_REF" && \
+    git checkout --detach FETCH_HEAD && \
+    git rev-parse --short HEAD
+
+COPY patches/ /tmp/repo/patches/
+COPY build/apply-patches.sh /tmp/repo/build/apply-patches.sh
+RUN bash -c '. /tmp/repo/build/apply-patches.sh' && git diff --stat
+
+# The SDK is split across three wheels -- _rocm_sdk_core (runtime and the LLVM
+# toolchain), _rocm_sdk_devel (headers and cmake configs) and
+# _rocm_sdk_libraries_gfx900 (rocBLAS and friends) -- but hip-lang-config.cmake
+# assumes one merged tree and execs <root>/bin/amdllvm to identify the compiler.
+# `rocm-sdk path --root` points at the devel wheel, where bin/ does not exist,
+# so the configure fails with "could not exec .../bin/amdllvm" and then the
+# misleading "clangrt builtins lib could not be found". The toolchain actually
+# lives in _rocm_sdk_core/lib/llvm/bin. Link it into the root the config
+# expects, and name the compiler by its real path.
+RUN set -eux;     ROCM_PATH="$(rocm-sdk path --root)";     SP="$(python3 -c 'import site; print(site.getsitepackages()[0])')";     LLVM_BIN="$SP/_rocm_sdk_core/lib/llvm/bin";     test -x "$LLVM_BIN/amdllvm";     mkdir -p "$ROCM_PATH/bin";     ln -sf "$LLVM_BIN"/amdllvm "$LLVM_BIN"/amdclang "$LLVM_BIN"/amdclang++ "$ROCM_PATH/bin/";     export ROCM_PATH PATH="$ROCM_PATH/bin:$PATH";     cmake -B build -G Ninja \
+      -DGGML_HIP=ON \
+      -DGPU_TARGETS=gfx900 \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_PREFIX_PATH="$(rocm-sdk path --cmake)" \
+      -DCMAKE_HIP_COMPILER="$LLVM_BIN/amdclang++" \
+      -DGGML_HIP_GRAPHS=OFF \
+      -DGGML_BACKEND_DL=ON \
+      -DGGML_CPU_ALL_VARIANTS=ON \
+      -DLLAMA_BUILD_SERVER=ON \
+      -DLLAMA_CURL=OFF && \
+    cmake --build build --config Release -j"$(nproc)"
+
+ENV HSA_OVERRIDE_GFX_VERSION=9.0.0 \
+    HSA_ENABLE_SDMA=0 \
+    HSA_XNACK=0 \
+    GPU_MAX_ALLOC_PERCENT=100
+ENTRYPOINT ["/app/build/bin/llama-bench"]
