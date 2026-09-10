@@ -12,7 +12,11 @@ fi
 # ref", and a build script that ignores that silently compiles whatever the
 # checkout already had. That happened on 2026-09-08 and produced a build
 # labelled as one commit but containing another.
-if ! printf '%s' "$LLAMA_CPP_REF" | grep -qE '^[0-9a-f]{40}$'; then
+# Bash pattern match, not `printf | grep -q`: under `set -o pipefail` the writer
+# in that idiom can take SIGPIPE when grep exits on the first match and kill the
+# whole script. It has done so four separate times in this repo. No subprocess
+# is needed for a 40-character check.
+if [[ ! "$LLAMA_CPP_REF" =~ ^[0-9a-f]{40}$ ]]; then
     echo "✗  $_ref_file must contain a full 40-character commit SHA, got: $LLAMA_CPP_REF" >&2
     echo "   Short SHAs cannot be fetched from GitHub." >&2
     exit 1

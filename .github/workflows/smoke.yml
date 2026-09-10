@@ -1,0 +1,69 @@
+# Syntax and lint checks for the shell and Python in this repo.
+#
+# Why this exists: nothing here is exercised on every change -- 21 shell scripts
+# across run/, bench/, build/, setup/ and lib/, most of them run only when the
+# hardware path they drive is being used. The failures that have actually
+# happened in this repo are exactly the ones these checks catch:
+#
+#   * `cmd | grep -q` under `set -o pipefail`, where grep exits early, the writer
+#     takes SIGPIPE and the whole script dies. Recurred four separate times.
+#   * an awk `print gpu` that emits an empty string when the Vega is GPU 0,
+#     silently benchmarking the CPU while reporting ROCm.
+#   * a stray closing brace left behind by an edit, caught by chance.
+name: smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n (parse every script)
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            bash -n "$f" || { echo "::error file=$f::bash -n failed"; fail=1; }
+          done < <(git ls-files '*.sh')
+          exit $fail
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          # SC1091: sourced files are resolved at run time, not in CI.
+          # SC2086: deliberate word splitting on flag strings in several launchers.
+          shellcheck --severity=warning --exclude=SC1091,SC2086 $(git ls-files '*.sh')
+
+      - name: no `| grep -q` under pipefail
+        run: |
+          # The SIGPIPE trap above. Capture the output first, or use bash [[ ]].
+          if git ls-files '*.sh' | xargs grep -n '| *grep -q' 2>/dev/null | grep -v '^\s*#'; then
+            echo "::error::pipe-to-grep-q dies under set -o pipefail when the writer takes SIGPIPE"
+            exit 1
+          fi
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: py_compile
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            python3 -m py_compile "$f" || { echo "::error file=$f::py_compile failed"; fail=1; }
+          done < <(git ls-files '*.py')
+          exit $fail
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: markdown anchors and file links resolve
+        run: python3 .github/check-links.py
