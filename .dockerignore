@@ -5,3 +5,4 @@
 *
 !patches/
 !build/apply-patches.sh
+!build/pytorch-smoke.py

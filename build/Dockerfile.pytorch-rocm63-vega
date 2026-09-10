@@ -1,0 +1,31 @@
+# PyTorch on a Vega 8 APU (gfx90c) via gfx900.
+#
+# Why ROCm 6.3 and not something newer: 6.3.4 is the last ROCm release that
+# compiles consumer gfx9 at all, and the wheels follow. torch 2.7.0+rocm6.3
+# bundles real rocBLAS gfx900 kernels (Kernels.so-000-gfx900.hsaco plus
+# TensileLibrary_lazy_gfx900.dat); torch 2.8.0+rocm6.4 carries only leftover
+# MIOpen tuning databases named gfx900 and no kernels at all. See
+# docs/ARCHITECTURE.md and bench/results/2026-09-10-rocm-gfx900-library-survey.tsv.
+#
+# No ROCm base image is needed: the wheel bundles libamdhip64, rocBLAS, MIOpen
+# and rocRAND. The host supplies only the amdgpu kernel driver and /dev/kfd.
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgomp1 libnuma1 && \
+    rm -rf /var/lib/apt/lists/*
+
+ARG TORCH_VERSION=2.7.0+rocm6.3
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/rocm6.3 \
+        "torch==${TORCH_VERSION}"
+
+# gfx90c is ISA-identical to gfx900; the override makes the runtime load the
+# gfx900 kernels. SDMA and XNACK are both disabled -- XNACK=1 hard-freezes this
+# APU, see docs/TROUBLESHOOTING.md.
+ENV HSA_OVERRIDE_GFX_VERSION=9.0.0 \
+    HSA_ENABLE_SDMA=0 \
+    HSA_XNACK=0 \
+    PYTORCH_ROCM_ARCH=gfx900
+
+COPY build/pytorch-smoke.py /opt/pytorch-smoke.py
+ENTRYPOINT ["python3", "/opt/pytorch-smoke.py"]
